@@ -1,23 +1,20 @@
 import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
 import mongoose from "mongoose";
+import cors from "cors";
+import dotenv from "dotenv";
 
-// Import Routes
 import authRoutes from "./routes/authRoutes.js";
-import loansRoutes from "./routes/loansRoutes.js";
 import accountRoutes from "./routes/accountRoutes.js";
+import loanRoutes from "./routes/loanRoutes.js";
 
-// Load Environment Variables
 dotenv.config();
 
-// Initialize Express App
 const app = express();
 
 // ==========================================
 // MIDDLEWARE & SECURITY (THE HANDSHAKE)
 // ==========================================
-app.use(express.json()); // Allows the server to accept JSON data in req.body
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // CORS Policy: Explicitly allow your Netlify domain and local environment
@@ -30,43 +27,36 @@ app.use(
   }),
 );
 
-// ==========================================
-// DATABASE CONNECTION (THE VAULT)
-// ==========================================
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ MongoDB Atlas Connected Successfully"))
-  .catch((error) => {
-    console.error("❌ MongoDB Connection Error:", error.message);
-    process.exit(1); // Stop the server if the database fails to connect
-  });
+const PORT = process.env.PORT || 5000;
+const MONGODB_URI = process.env.MONGODB_URI;
 
 // ==========================================
 // API ROUTES
 // ==========================================
-// 1. Identity & Auth (Login, Register, Directory, Profile Update)
 app.use("/api/auth", authRoutes);
-
-// 2. Ledger & Loans (Requests, Reviews, Payroll Export)
-app.use("/api/loans", loansRoutes);
-
-// 3. Financial Controls (User Balances, Admin Adjustments)
 app.use("/api/account", accountRoutes);
+app.use("/api/loans", loanRoutes);
 
-// Base Health Check Route (To verify the API is alive on Render)
+// Base Health Check Route
 app.get("/", (req, res) => {
   res.status(200).json({
     message: "ASCON Cooperative API is Live 🚀",
-    environment: process.env.NODE_ENV || "development",
+    environment: process.env.NODE_ENV || "production",
   });
 });
 
 // ==========================================
-// SERVER INITIALIZATION
+// DATABASE CONNECTION & SERVER START
 // ==========================================
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🌐 Allowed Frontend: https://asconcooperative.netlify.app`);
-});
+mongoose
+  .connect(MONGODB_URI)
+  .then(() => {
+    console.log("✅ Connected to MongoDB successfully");
+    app.listen(PORT, () => {
+      console.log(`🚀 Server is listening on port ${PORT}`);
+      console.log(`🌐 Allowed Frontend: https://asconcooperative.netlify.app`);
+    });
+  })
+  .catch((error) => {
+    console.error("❌ Error connecting to MongoDB:", error.message);
+  });
