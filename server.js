@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import authRoutes from "./routes/authRoutes.js";
 import accountRoutes from "./routes/accountRoutes.js";
 import loanRoutes from "./routes/loanRoutes.js";
+import uploadRoutes from "./routes/uploadRoutes.js";
 
 dotenv.config();
 
@@ -36,6 +37,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 app.use("/api/auth", authRoutes);
 app.use("/api/account", accountRoutes);
 app.use("/api/loans", loanRoutes);
+app.use("/api/upload", uploadRoutes);
 
 // Base Health Check Route
 app.get("/", (req, res) => {

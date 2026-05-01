@@ -5,12 +5,21 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 const router = express.Router();
 
 // @route   GET /api/account/my-account
-// @desc    Get the logged-in user's financial account data
-// @access  Private (Requires Token)
 router.get("/my-account", protect, async (req, res) => {
   try {
-    const account = await Account.findOne({ cooperatorId: req.user.id });
-    if (!account) return res.status(404).json({ message: "Account not found" });
+    // Reverted to req.user.id to match your middleware
+    const userId = req.user.id || req.user._id;
+
+    let account = await Account.findOne({ cooperatorId: userId });
+    
+    if (!account) {
+      account = await Account.create({
+        cooperatorId: userId,
+        totalSavings: 0,
+        availableCreditLimit: 0
+      });
+    }
+
     res.status(200).json(account);
   } catch (error) {
     console.error("Fetch Account Error:", error);
@@ -19,41 +28,26 @@ router.get("/my-account", protect, async (req, res) => {
 });
 
 // @route   POST /api/account/deposit
-// @desc    Deposit money into savings and update credit limit
-// @access  Private (Requires Token)
 router.post("/deposit", protect, async (req, res) => {
   try {
     const { amountInKobo } = req.body;
 
-    // 1. Validation to prevent fake or negative deposits
     if (!amountInKobo || amountInKobo <= 0 || !Number.isInteger(amountInKobo)) {
-      return res
-        .status(400)
-        .json({
-          message:
-            "Invalid deposit amount. Must be a positive integer in Kobo.",
-        });
+      return res.status(400).json({ message: "Invalid deposit amount. Must be a positive integer in Kobo." });
     }
 
-    // 2. Find the user's account
-    const account = await Account.findOne({ cooperatorId: req.user.id });
+    const userId = req.user.id || req.user._id;
+    const account = await Account.findOne({ cooperatorId: userId });
+    
     if (!account) {
       return res.status(404).json({ message: "Account not found" });
     }
 
-    // 3. Add the deposit to their total savings
     account.totalSavings += amountInKobo;
-
-    // 4. Cooperative Math: Automatically set credit limit to 200% (2x) of their total savings
     account.availableCreditLimit = account.totalSavings * 2;
-
-    // 5. Save the updated financial state
     await account.save();
 
-    res.status(200).json({
-      message: "Deposit successful",
-      account,
-    });
+    res.status(200).json({ message: "Deposit successful", account });
   } catch (error) {
     console.error("Deposit Error:", error);
     res.status(500).json({ message: "Server error processing deposit" });
@@ -65,9 +59,14 @@ router.post("/deposit", protect, async (req, res) => {
 // @access  Private/Admin
 router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
   try {
-    const account = await Account.findOne({ cooperatorId: req.params.cooperatorId });
-    if (!account) return res.status(404).json({ message: "Account not found for this user." });
-    
+    const account = await Account.findOne({
+      cooperatorId: req.params.cooperatorId,
+    });
+    if (!account)
+      return res
+        .status(404)
+        .json({ message: "Account not found for this user." });
+
     res.status(200).json(account);
   } catch (error) {
     console.error("Fetch Admin Account Error:", error);
@@ -80,32 +79,38 @@ router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
 // @access  Private/Admin
 router.post("/admin-adjust", protect, admin, async (req, res) => {
   try {
-    const { cooperatorId, amountInKobo, type } = req.body; // type is 'CREDIT' or 'DEBIT'
+    const { cooperatorId, amountInKobo, type } = req.body;
 
     if (!amountInKobo || amountInKobo <= 0) {
-      return res.status(400).json({ message: "Amount must be greater than zero." });
+      return res
+        .status(400)
+        .json({ message: "Amount must be greater than zero." });
     }
 
     const account = await Account.findOne({ cooperatorId });
-    if (!account) return res.status(404).json({ message: "Account not found." });
+    if (!account)
+      return res.status(404).json({ message: "Account not found." });
 
     if (type === "CREDIT") {
       account.totalSavings += amountInKobo;
     } else if (type === "DEBIT") {
       if (account.totalSavings < amountInKobo) {
-        return res.status(400).json({ message: "Cannot debit more than the available total savings." });
+        return res
+          .status(400)
+          .json({
+            message: "Cannot debit more than the available total savings.",
+          });
       }
       account.totalSavings -= amountInKobo;
     } else {
       return res.status(400).json({ message: "Invalid adjustment type." });
     }
 
-    // Recalculate credit limit instantly based on the new savings balance
     account.availableCreditLimit = account.totalSavings * 2;
     await account.save();
 
     res.status(200).json({
-      message: `Successfully ${type === 'CREDIT' ? 'credited' : 'debited'} account.`,
+      message: `Successfully ${type === "CREDIT" ? "credited" : "debited"} account.`,
       account,
     });
   } catch (error) {
