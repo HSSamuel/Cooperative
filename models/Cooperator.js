@@ -16,6 +16,8 @@ const cooperatorSchema = new mongoose.Schema(
       type: String,
       required: true,
       select: false,
+      resetPasswordToken: String,
+      resetPasswordExpire: Date,
     },
     firstName: {
       type: String,
@@ -38,6 +40,7 @@ const cooperatorSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    avatarUrl: { type: String, default: "" },
   },
   { timestamps: true },
 );

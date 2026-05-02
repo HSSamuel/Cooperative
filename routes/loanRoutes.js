@@ -7,6 +7,7 @@ import {
   sendGuarantorRequestEmail,
   sendLoanStatusEmail,
 } from "../utils/emailService.js";
+import Notification from "../models/Notification.js";
 
 const router = express.Router();
 
@@ -82,11 +83,25 @@ router.post("/request", protect, async (req, res) => {
 
     await newLoan.save();
 
-    // FIXED: Using g1.email and g2.email from the database query above
     sendGuarantorRequestEmail(g1.email, req.user.firstName, amountInKobo);
     sendGuarantorRequestEmail(g2.email, req.user.firstName, amountInKobo);
 
-    // FIXED: Only one response is sent to the frontend
+    // 🚀 NEW: Generate in-app notifications for both guarantors
+    await Notification.create([
+      {
+        user: g1._id,
+        title: "Guarantor Request",
+        message: `${req.user.firstName} requested you as a guarantor for a loan of ₦${(amountInKobo / 100).toLocaleString()}.`,
+        type: "info",
+      },
+      {
+        user: g2._id,
+        title: "Guarantor Request",
+        message: `${req.user.firstName} requested you as a guarantor for a loan of ₦${(amountInKobo / 100).toLocaleString()}.`,
+        type: "info",
+      },
+    ]);
+
     res.status(201).json({
       message: "Loan submitted. Waiting for guarantors to accept.",
       loan: newLoan,
@@ -165,7 +180,14 @@ router.put("/:id/review", protect, admin, async (req, res) => {
       );
     }
 
-    // FIXED: Only one response
+    // 🚀 NEW: Notify the applicant in-app of the Admin's decision
+    await Notification.create({
+      user: loan.cooperatorId._id,
+      title: `Loan ${status === "APPROVED" ? "Approved" : "Rejected"}`,
+      message: `Your loan application for ₦${(loan.amountRequested / 100).toLocaleString()} was ${status.toLowerCase()} by the Admin.`,
+      type: status === "APPROVED" ? "success" : "danger",
+    });
+
     res.status(200).json({
       message: `Loan successfully marked as ${status}`,
       loan,
@@ -202,7 +224,6 @@ router.post("/:id/repay", protect, async (req, res) => {
         .json({ message: "You can only make payments on APPROVED loans" });
     }
 
-    // FIXED: Removed the duplicate addition line here
     loan.amountRepaid += amountInKobo;
 
     const targetRepayment = loan.amountDue || loan.amountRequested;
@@ -213,6 +234,15 @@ router.post("/:id/repay", protect, async (req, res) => {
     }
 
     await loan.save();
+
+    // 🚀 NEW: Send a financial alert for the receipt
+    await Notification.create({
+      user: req.user._id,
+      title:
+        loan.status === "REPAID" ? "Loan Fully Repaid" : "Payment Received",
+      message: `Your repayment of ₦${(amountInKobo / 100).toLocaleString()} was processed successfully.${loan.status === "REPAID" ? " Your loan is now fully settled." : ""}`,
+      type: "financial",
+    });
 
     res.status(200).json({
       message:
@@ -290,12 +320,19 @@ router.put("/:id/guarantee", protect, async (req, res) => {
     }
 
     await loan.save();
-    res
-      .status(200)
-      .json({
-        message: `Successfully ${action.toLowerCase()} the request.`,
-        loan,
-      });
+
+    // 🚀 NEW: Notify the applicant of the guarantor's decision
+    await Notification.create({
+      user: loan.cooperatorId,
+      title: `Guarantor ${action === "ACCEPTED" ? "Accepted" : "Declined"}`,
+      message: `A guarantor has ${action.toLowerCase()} your request.`,
+      type: action === "ACCEPTED" ? "success" : "danger",
+    });
+
+    res.status(200).json({
+      message: `Successfully ${action.toLowerCase()} the request.`,
+      loan,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error processing guarantee" });
   }

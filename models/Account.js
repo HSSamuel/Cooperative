@@ -26,6 +26,15 @@ const accountSchema = new mongoose.Schema(
         message: "availableCreditLimit must be an integer (Kobo)",
       },
     },
+    status: {
+      type: String,
+      enum: ["ACTIVE", "PAUSED", "INACTIVE"],
+      default: "ACTIVE",
+    },
+    customMonthlySavings: {
+      type: Number, // In Kobo. If 0, the system uses the global standard.
+      default: 0,
+    },
   },
   { timestamps: true },
 );
