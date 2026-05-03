@@ -6,8 +6,10 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 import {
   sendGuarantorRequestEmail,
   sendLoanStatusEmail,
+  sendAdminApprovalEmail, // Ensure this is imported!
 } from "../utils/emailService.js";
 import Notification from "../models/Notification.js";
+import { logAdminAction } from "../utils/auditLogger.js";
 
 const router = express.Router();
 
@@ -33,6 +35,25 @@ router.post("/request", protect, async (req, res) => {
         .json({ message: "You must provide two different guarantors." });
     }
 
+    // Grab the current user to check their join date
+    const currentUser = await Cooperator.findById(req.user._id);
+
+    // =====================================================================
+    // 🚀 BUSINESS RULE: 6-MONTH PROBATION PERIOD
+    // Currently commented out for testing. Delete the /* and */ to activate in production.
+    // =====================================================================
+    /*
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    
+    if (currentUser.createdAt > sixMonthsAgo) {
+      return res.status(400).json({ 
+        message: "Loan denied. You must be an active cooperative member for at least 6 months before requesting a loan." 
+      });
+    }
+    */
+    // =====================================================================
+
     const account = await Account.findOne({ cooperatorId: req.user._id });
     if (!account || amountInKobo > account.availableCreditLimit) {
       return res
@@ -42,12 +63,12 @@ router.post("/request", protect, async (req, res) => {
 
     const existingPending = await Loan.findOne({
       cooperatorId: req.user._id,
-      status: { $in: ["PENDING_GUARANTORS", "PENDING_ADMIN"] },
+      status: { $in: ["PENDING_GUARANTORS", "PENDING_ADMIN", "APPROVED"] },
     });
     if (existingPending) {
       return res
         .status(400)
-        .json({ message: "You already have an active loan application." });
+        .json({ message: "You already have an active or pending loan." });
     }
 
     const g1 = await Cooperator.findOne({ fileNumber: guarantor1FileNumber });
@@ -67,7 +88,7 @@ router.post("/request", protect, async (req, res) => {
         .json({ message: "You cannot guarantee your own loan." });
     }
 
-    const interestRate = 5; // 5%
+    const interestRate = 5; // 5% flat rate
     const interestAmount = Math.round(amountInKobo * (interestRate / 100));
     const amountDue = amountInKobo + interestAmount;
 
@@ -83,10 +104,20 @@ router.post("/request", protect, async (req, res) => {
 
     await newLoan.save();
 
-    sendGuarantorRequestEmail(g1.email, req.user.firstName, amountInKobo);
-    sendGuarantorRequestEmail(g2.email, req.user.firstName, amountInKobo);
+    sendGuarantorRequestEmail(
+      g1.email,
+      req.user.firstName,
+      amountInKobo,
+      newLoan._id,
+    );
+    sendGuarantorRequestEmail(
+      g2.email,
+      req.user.firstName,
+      amountInKobo,
+      newLoan._id,
+    );
 
-    // 🚀 NEW: Generate in-app notifications for both guarantors
+    // Save persistent notifications to the database
     await Notification.create([
       {
         user: g1._id,
@@ -101,6 +132,22 @@ router.post("/request", protect, async (req, res) => {
         type: "info",
       },
     ]);
+
+    // Trigger Live WebSockets if the guarantors are online
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+
+    if (io && onlineUsers) {
+      const g1Socket = onlineUsers.get(g1._id.toString());
+      const g2Socket = onlineUsers.get(g2._id.toString());
+
+      const liveMessage = `${req.user.firstName} just requested you as a loan guarantor.`;
+
+      if (g1Socket)
+        io.to(g1Socket).emit("new_guarantor_request", { message: liveMessage });
+      if (g2Socket)
+        io.to(g2Socket).emit("new_guarantor_request", { message: liveMessage });
+    }
 
     res.status(201).json({
       message: "Loan submitted. Waiting for guarantors to accept.",
@@ -170,6 +217,14 @@ router.put("/:id/review", protect, admin, async (req, res) => {
 
     await loan.save();
 
+    // Write this action to the Immutable Audit Ledger
+    logAdminAction(
+      req.user.id || req.user._id,
+      status === "APPROVED" ? "APPROVED_LOAN" : "REJECTED_LOAN",
+      `${status === "APPROVED" ? "Approved" : "Rejected"} a loan of ₦${(loan.amountRequested / 100).toLocaleString()} for ${loan.cooperatorId.fileNumber}`,
+      loan._id,
+    );
+
     // Send email to the applicant
     if (loan.cooperatorId && loan.cooperatorId.email) {
       sendLoanStatusEmail(
@@ -180,7 +235,7 @@ router.put("/:id/review", protect, admin, async (req, res) => {
       );
     }
 
-    // 🚀 NEW: Notify the applicant in-app of the Admin's decision
+    // Notify the applicant in-app of the Admin's decision
     await Notification.create({
       user: loan.cooperatorId._id,
       title: `Loan ${status === "APPROVED" ? "Approved" : "Rejected"}`,
@@ -235,7 +290,7 @@ router.post("/:id/repay", protect, async (req, res) => {
 
     await loan.save();
 
-    // 🚀 NEW: Send a financial alert for the receipt
+    // Send a financial alert for the receipt
     await Notification.create({
       user: req.user._id,
       title:
@@ -313,6 +368,19 @@ router.put("/:id/guarantee", protect, async (req, res) => {
       loan.guarantor2.status === "ACCEPTED"
     ) {
       loan.status = "PENDING_ADMIN";
+
+      // Fire email to all Admins since it is now ready for review
+      const admins = await Cooperator.find({
+        role: { $in: ["ADMIN", "SUPER_ADMIN"] },
+      });
+      admins.forEach((admin) => {
+        sendAdminApprovalEmail(
+          admin.email,
+          "A Cooperator",
+          loan.amountRequested,
+          loan._id,
+        );
+      });
     } else if (action === "DECLINED") {
       loan.status = "REJECTED";
       loan.adminComment =
@@ -321,7 +389,7 @@ router.put("/:id/guarantee", protect, async (req, res) => {
 
     await loan.save();
 
-    // 🚀 NEW: Notify the applicant of the guarantor's decision
+    // Notify the applicant of the guarantor's decision
     await Notification.create({
       user: loan.cooperatorId,
       title: `Guarantor ${action === "ACCEPTED" ? "Accepted" : "Declined"}`,

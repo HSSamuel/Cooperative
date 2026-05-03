@@ -1,8 +1,9 @@
 import express from "express";
 import Account from "../models/Account.js";
-import Loan from "../models/Loan.js"; // 🚀 FIXED: Added missing Loan import for reconciliation
-import Notification from "../models/Notification.js"; // 🚀 NEW: Added Notification engine
+import Loan from "../models/Loan.js";
+import Notification from "../models/Notification.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
+import { logAdminAction } from "../utils/auditLogger.js"; // 🚀 INJECTED: Accountability Engine
 
 const router = express.Router();
 
@@ -42,12 +43,9 @@ router.post("/deposit", protect, async (req, res) => {
     const { amountInKobo } = req.body;
 
     if (!amountInKobo || amountInKobo <= 0 || !Number.isInteger(amountInKobo)) {
-      return res
-        .status(400)
-        .json({
-          message:
-            "Invalid deposit amount. Must be a positive integer in Kobo.",
-        });
+      return res.status(400).json({
+        message: "Invalid deposit amount. Must be a positive integer in Kobo.",
+      });
     }
 
     const userId = req.user.id || req.user._id;
@@ -58,10 +56,10 @@ router.post("/deposit", protect, async (req, res) => {
     }
 
     account.totalSavings += amountInKobo;
+    // Standard Cooperative Rule: Credit Limit is 2x Savings
     account.availableCreditLimit = account.totalSavings * 2;
     await account.save();
 
-    // 🚀 NEW: Notify the user of their deposit
     await Notification.create({
       user: userId,
       title: "Deposit Successful",
@@ -109,7 +107,10 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
         .json({ message: "Amount must be greater than zero." });
     }
 
-    const account = await Account.findOne({ cooperatorId });
+    const account = await Account.findOne({ cooperatorId }).populate(
+      "cooperatorId",
+      "fileNumber",
+    );
     if (!account)
       return res.status(404).json({ message: "Account not found." });
 
@@ -129,7 +130,14 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
     account.availableCreditLimit = account.totalSavings * 2;
     await account.save();
 
-    // 🚀 NEW: Notify the user that an Admin adjusted their account
+    // 🚀 AUDIT: Log manual ledger adjustments
+    logAdminAction(
+      req.user.id || req.user._id,
+      "MANUAL_LEDGER_ADJUSTMENT",
+      `Manually ${type.toLowerCase()}ed ₦${(amountInKobo / 100).toLocaleString()} for ${account.cooperatorId.fileNumber}`,
+      account.cooperatorId._id,
+    );
+
     await Notification.create({
       user: cooperatorId,
       title: "Admin Account Adjustment",
@@ -147,6 +155,52 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
   }
 });
 
+// 🚀 NEW: Admin Route to Override Credit Limits Manually
+// @route   PUT /api/account/user/:cooperatorId/credit-limit
+// @desc    Override the automated 2x savings credit limit rule
+// @access  Private/Admin
+router.put(
+  "/user/:cooperatorId/credit-limit",
+  protect,
+  admin,
+  async (req, res) => {
+    try {
+      const { newCreditLimitInKobo } = req.body;
+
+      if (newCreditLimitInKobo === undefined || newCreditLimitInKobo < 0) {
+        return res
+          .status(400)
+          .json({ message: "Invalid credit limit amount." });
+      }
+
+      const account = await Account.findOne({
+        cooperatorId: req.params.cooperatorId,
+      }).populate("cooperatorId", "fileNumber");
+      if (!account)
+        return res.status(404).json({ message: "Account not found." });
+
+      account.availableCreditLimit = newCreditLimitInKobo;
+      await account.save();
+
+      // 🚀 AUDIT: Log the override
+      logAdminAction(
+        req.user.id || req.user._id,
+        "CREDIT_LIMIT_OVERRIDE",
+        `Overrode credit limit to ₦${(newCreditLimitInKobo / 100).toLocaleString()} for ${account.cooperatorId.fileNumber}`,
+        account.cooperatorId._id,
+      );
+
+      res.status(200).json({
+        message: "Credit limit updated successfully",
+        account,
+      });
+    } catch (error) {
+      console.error("Update Credit Limit Error:", error);
+      res.status(500).json({ message: "Server error updating credit limit" });
+    }
+  },
+);
+
 // @route   POST /api/account/run-reconciliation
 // @desc    Admin triggers monthly ledger updates after payroll clears
 // @access  Private/Admin
@@ -155,17 +209,12 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
     const { standardSavingsKobo } = req.body;
 
     if (!standardSavingsKobo || standardSavingsKobo <= 0) {
-      return res
-        .status(400)
-        .json({
-          message: "Must provide a valid standard savings amount in Kobo.",
-        });
+      return res.status(400).json({
+        message: "Must provide a valid standard savings amount in Kobo.",
+      });
     }
 
-    // Array to hold all mass-notifications so we can insert them into the DB at once (highly efficient)
     const notificationsToInsert = [];
-
-    // 1. UPDATE SAVINGS (ONLY FOR ACTIVE ACCOUNTS)
     const accounts = await Account.find({ status: "ACTIVE" });
 
     for (let account of accounts) {
@@ -176,10 +225,8 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
 
       account.totalSavings += amountToSave;
       account.availableCreditLimit = account.totalSavings * 2;
-
       await account.save();
 
-      // Queue the savings notification
       notificationsToInsert.push({
         user: account.cooperatorId,
         title: "Monthly Savings Deducted",
@@ -188,7 +235,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       });
     }
 
-    // 2. DEDUCT ALL ACTIVE LOAN INSTALLMENTS
     const activeLoans = await Loan.find({ status: "APPROVED" }).populate(
       "cooperatorId",
     );
@@ -200,11 +246,11 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         cooperatorId: loan.cooperatorId._id,
       });
       if (userAccount && userAccount.status !== "ACTIVE") {
-        continue; // Skip to the next loan if the user is paused
+        continue;
       }
 
       const targetRepayment = loan.amountDue || loan.amountRequested;
-      const monthlyInstallment = Math.round(targetRepayment * 0.1); // 10% monthly deduction
+      const monthlyInstallment = Math.round(targetRepayment * 0.1);
 
       loan.amountRepaid += monthlyInstallment;
 
@@ -216,7 +262,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       await loan.save();
       loansProcessed++;
 
-      // Queue the loan deduction notification
       notificationsToInsert.push({
         user: loan.cooperatorId._id,
         title: "Loan Installment Processed",
@@ -225,10 +270,16 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       });
     }
 
-    // 🚀 NEW: Bulk insert all generated notifications to the database instantly
     if (notificationsToInsert.length > 0) {
       await Notification.insertMany(notificationsToInsert);
     }
+
+    // 🚀 AUDIT: Log the massive reconciliation action
+    logAdminAction(
+      req.user.id || req.user._id,
+      "RAN_MONTHLY_RECONCILIATION",
+      `Processed monthly reconciliation for ${accounts.length} accounts and ${loansProcessed} loans.`,
+    );
 
     res.status(200).json({
       message: "Monthly Reconciliation Complete!",
@@ -252,7 +303,8 @@ router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
 
     const account = await Account.findOne({
       cooperatorId: req.params.cooperatorId,
-    });
+    }).populate("cooperatorId", "fileNumber");
+
     if (!account)
       return res
         .status(404)
@@ -272,7 +324,14 @@ router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
 
     await account.save();
 
-    // 🚀 NEW: Notify the user of settings change
+    // 🚀 AUDIT: Log settings updates
+    logAdminAction(
+      req.user.id || req.user._id,
+      "UPDATED_ACCOUNT_SETTINGS",
+      `Updated settings for ${account.cooperatorId.fileNumber}. Status: ${status}`,
+      account.cooperatorId._id,
+    );
+
     await Notification.create({
       user: req.params.cooperatorId,
       title: "Account Settings Updated",
