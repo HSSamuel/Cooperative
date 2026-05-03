@@ -6,7 +6,7 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 import {
   sendGuarantorRequestEmail,
   sendLoanStatusEmail,
-  sendAdminApprovalEmail, // Ensure this is imported!
+  sendAdminApprovalEmail,
 } from "../utils/emailService.js";
 import Notification from "../models/Notification.js";
 import { logAdminAction } from "../utils/auditLogger.js";
@@ -54,12 +54,24 @@ router.post("/request", protect, async (req, res) => {
     */
     // =====================================================================
 
+    // --- THE NEW FLAWLESS ACCOUNT VALIDATION ---
     const account = await Account.findOne({ cooperatorId: req.user._id });
-    if (!account || amountInKobo > account.availableCreditLimit) {
-      return res
-        .status(400)
-        .json({ message: "Loan request exceeds your available credit limit." });
+
+    // Check 1: Prevent systemic errors if a legacy test account is missing
+    if (!account) {
+      return res.status(400).json({
+        message:
+          "Financial profile missing. Please contact Admin to sync your account.",
+      });
     }
+
+    // Check 2: Actual business logic validation
+    if (amountInKobo > account.availableCreditLimit) {
+      return res.status(400).json({
+        message: `Request exceeds your available credit limit of ₦${(account.availableCreditLimit / 100).toLocaleString()}.`,
+      });
+    }
+    // -------------------------------------------
 
     const existingPending = await Loan.findOne({
       cooperatorId: req.user._id,
