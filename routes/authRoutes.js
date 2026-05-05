@@ -5,7 +5,8 @@ import crypto from "crypto";
 import { sendPasswordResetEmail } from "../utils/emailService.js";
 import Cooperator from "../models/Cooperator.js";
 import Account from "../models/Account.js";
-import AuditLog from "../models/AuditLog.js"; // 🚀 NEW: Import Audit Model
+import AuditLog from "../models/AuditLog.js";
+import Notification from "../models/Notification.js"; // 🚀 NEW: Notification Engine
 import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
@@ -18,7 +19,6 @@ router.post("/register", async (req, res) => {
     const { fileNumber, email, password, firstName, lastName, otherName } =
       req.body;
 
-    // Check if a user with this file number OR email already exists
     const existingUser = await Cooperator.findOne({
       $or: [{ email }, { fileNumber }],
     });
@@ -41,13 +41,21 @@ router.post("/register", async (req, res) => {
     });
     const savedCooperator = await newCooperator.save();
 
-    // Automatically create a blank financial account for the new user
     const newAccount = new Account({
       cooperatorId: savedCooperator._id,
       totalSavings: 0,
       availableCreditLimit: 0,
     });
     await newAccount.save();
+
+    // 🚀 NEW: Create a Welcome Notification
+    await Notification.create({
+      user: savedCooperator._id,
+      title: "Welcome to ASCON Coop!",
+      message:
+        "Your cooperative account has been successfully created. You can now start tracking your savings.",
+      type: "success",
+    });
 
     res.status(201).json({
       message: "Cooperator registered successfully",
@@ -64,17 +72,14 @@ router.post("/register", async (req, res) => {
 // ==========================================
 router.post("/login", async (req, res) => {
   try {
-    // Extract fileNumber instead of email from the frontend request
     const { fileNumber, password } = req.body;
 
-    // Search the database using the fileNumber
     const user = await Cooperator.findOne({ fileNumber }).select("+password");
     if (!user)
       return res.status(400).json({
         message: "Invalid credentials. Please check your ASCON File Number.",
       });
 
-    // Compare passwords
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch)
       return res
@@ -89,6 +94,14 @@ router.post("/login", async (req, res) => {
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, {
       expiresIn: "1d",
+    });
+
+    // 🚀 NEW: Security Notification for new logins
+    await Notification.create({
+      user: user._id,
+      title: "New Security Login",
+      message: "A new login was detected on your account.",
+      type: "system",
     });
 
     res.status(200).json({
@@ -114,12 +127,8 @@ router.post("/login", async (req, res) => {
 // ==========================================
 // 3. ALL MEMBERS
 // ==========================================
-
-// @route   GET /api/auth/all-members
-// @desc    Get all registered cooperators (For Admin CRM)
 router.get("/all-members", async (req, res) => {
   try {
-    // Fetch all users but DO NOT send their passwords
     const users = await Cooperator.find()
       .select("-password")
       .sort({ createdAt: -1 });
@@ -133,35 +142,40 @@ router.get("/all-members", async (req, res) => {
 // ==========================================
 // 4. UPDATE USER PROFILE
 // ==========================================
-
-// @route   PUT /api/auth/profile
-// @desc    Update user profile (including avatar)
-// @access  Private
 router.put("/profile", protect, async (req, res) => {
   try {
-    // 1. Grab the correct ID format
     const userId = req.user.id || req.user._id;
-
-    // 2. Find the user
     const user = await Cooperator.findById(userId);
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // 3. Update the fields if they were provided in the request
     if (req.body.firstName) user.firstName = req.body.firstName;
     if (req.body.lastName) user.lastName = req.body.lastName;
     if (req.body.otherName !== undefined) user.otherName = req.body.otherName;
     if (req.body.email) user.email = req.body.email;
-
-    // Save the Cloudinary Avatar URL
     if (req.body.avatarUrl) user.avatarUrl = req.body.avatarUrl;
 
-    // 4. Save to database
     const updatedUser = await user.save();
 
-    // 5. Send back the updated user without the password
+    // 🚀 NEW: Track Profile Updates
+    await Notification.create({
+      user: updatedUser._id,
+      title: "Profile Updated",
+      message:
+        "Your personal cooperative profile information was successfully updated.",
+      type: "system",
+    });
+
+    // 🚀 NEW: Trigger Live WebSockets to ping the bell icon instantly
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+    if (io && onlineUsers) {
+      const userSocket = onlineUsers.get(updatedUser._id.toString());
+      if (userSocket) io.to(userSocket).emit("update_notifications");
+    }
+
     res.status(200).json({
       _id: updatedUser._id,
       firstName: updatedUser.firstName,
@@ -178,18 +192,12 @@ router.put("/profile", protect, async (req, res) => {
   }
 });
 
-// @route   PUT /api/auth/update-password
-// @desc    Update user password
-// @access  Private
 router.put("/update-password", protect, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-
     const userId = req.user.id || req.user._id;
-
     let user = await Cooperator.findById(userId).select("+password");
 
-    // Fallback if token uses fileNumber instead of ID
     if (!user && req.user.fileNumber) {
       user = await Cooperator.findOne({
         fileNumber: req.user.fileNumber,
@@ -214,8 +222,24 @@ router.put("/update-password", protect, async (req, res) => {
 
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(newPassword, salt);
-
     await user.save();
+
+    // 🚀 NEW: Track Security Changes
+    await Notification.create({
+      user: user._id,
+      title: "Security Alert: Password Changed",
+      message:
+        "Your account password was successfully changed. If this wasn't you, contact Admin immediately.",
+      type: "danger",
+    });
+
+    // 🚀 NEW: Trigger Live WebSockets to ping the bell icon
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+    if (io && onlineUsers) {
+      const userSocket = onlineUsers.get(user._id.toString());
+      if (userSocket) io.to(userSocket).emit("update_notifications");
+    }
 
     res.status(200).json({ message: "Password updated successfully." });
   } catch (error) {
@@ -227,21 +251,15 @@ router.put("/update-password", protect, async (req, res) => {
 // ==========================================
 // 5. PASSWORD RECOVERY SYSTEM
 // ==========================================
-
-// @route   POST /api/auth/forgot-password
-// @desc    Generate reset token and send email
-// @access  Public
 router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
-
     const user = await Cooperator.findOne({ email });
+
     if (!user) {
-      return res
-        .status(200)
-        .json({
-          message: "If that email is registered, a reset link has been sent.",
-        });
+      return res.status(200).json({
+        message: "If that email is registered, a reset link has been sent.",
+      });
     }
 
     const resetToken = crypto.randomBytes(20).toString("hex");
@@ -250,19 +268,17 @@ router.post("/forgot-password", async (req, res) => {
       .createHash("sha256")
       .update(resetToken)
       .digest("hex");
-
     user.resetPasswordExpire = Date.now() + 10 * 60 * 1000;
+
     await user.save();
 
     const resetUrl = `${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/reset-password/${resetToken}`;
 
     try {
       await sendPasswordResetEmail(user.email, user.firstName, resetUrl);
-      res
-        .status(200)
-        .json({
-          message: "If that email is registered, a reset link has been sent.",
-        });
+      res.status(200).json({
+        message: "If that email is registered, a reset link has been sent.",
+      });
     } catch (emailError) {
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
@@ -277,9 +293,6 @@ router.post("/forgot-password", async (req, res) => {
   }
 });
 
-// @route   PUT /api/auth/reset-password/:token
-// @desc    Reset password using token
-// @access  Public
 router.put("/reset-password/:token", async (req, res) => {
   try {
     const resetPasswordToken = crypto
@@ -312,6 +325,14 @@ router.put("/reset-password/:token", async (req, res) => {
     user.resetPasswordExpire = undefined;
     await user.save();
 
+    // 🚀 NEW: Track Password Recovery
+    await Notification.create({
+      user: user._id,
+      title: "Password Successfully Recovered",
+      message: "You used a recovery link to reset your password.",
+      type: "system",
+    });
+
     res
       .status(200)
       .json({ message: "Password successfully reset. You can now log in." });
@@ -324,19 +345,12 @@ router.put("/reset-password/:token", async (req, res) => {
 // ==========================================
 // 6. SYSTEM AUDIT ENGINE
 // ==========================================
-
-// 🚀 NEW: Route to fetch Audit Trails for the Command Center
-// @route   GET /api/auth/audit-logs
-// @desc    Get system audit logs (Admin only)
-// @access  Private/Admin
 router.get("/audit-logs", protect, async (req, res) => {
   try {
-    // Ensure only admins can read the ledger
     if (req.user.role !== "ADMIN" && req.user.role !== "SUPER_ADMIN") {
       return res.status(403).json({ message: "Not authorized. Admins only." });
     }
 
-    // Fetch the 50 most recent immutable actions
     const logs = await AuditLog.find()
       .populate("adminId", "firstName lastName fileNumber")
       .sort({ createdAt: -1 })

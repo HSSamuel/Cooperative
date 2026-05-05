@@ -18,94 +18,65 @@ const router = express.Router();
 // @access  Private
 router.post("/request", protect, async (req, res) => {
   try {
-    const { amountInKobo, guarantor1FileNumber, guarantor2FileNumber } =
-      req.body;
+    const { amountInKobo, guarantor1FileNumber, guarantor2FileNumber } = req.body;
 
     if (!amountInKobo || amountInKobo <= 0) {
       return res.status(400).json({ message: "Invalid loan amount." });
     }
     if (!guarantor1FileNumber || !guarantor2FileNumber) {
-      return res
-        .status(400)
-        .json({ message: "Two guarantors are strictly required." });
+      return res.status(400).json({ message: "Two guarantors are strictly required." });
     }
     if (guarantor1FileNumber === guarantor2FileNumber) {
-      return res
-        .status(400)
-        .json({ message: "You must provide two different guarantors." });
-    }
+      return res.status(400).json({ message: "You must provide two different guarantors." });
+    } 
 
-    // Grab the current user to check their join date
-    const currentUser = await Cooperator.findById(req.user._id);
+    const userId = req.user.id || req.user._id;
+    const currentUser = await Cooperator.findById(userId); 
 
-    // =====================================================================
-    // 🚀 BUSINESS RULE: 6-MONTH PROBATION PERIOD
-    // Currently commented out for testing. Delete the /* and */ to activate in production.
-    // =====================================================================
-    /*
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    
-    if (currentUser.createdAt > sixMonthsAgo) {
-      return res.status(400).json({ 
-        message: "Loan denied. You must be an active cooperative member for at least 6 months before requesting a loan." 
-      });
-    }
-    */
-    // =====================================================================
+    // --- FLAWLESS ACCOUNT VALIDATION ---
+    const account = await Account.findOne({ cooperatorId: userId }); 
 
-    // --- THE NEW FLAWLESS ACCOUNT VALIDATION ---
-    const account = await Account.findOne({ cooperatorId: req.user._id });
-
-    // Check 1: Prevent systemic errors if a legacy test account is missing
     if (!account) {
       return res.status(400).json({
-        message:
-          "Financial profile missing. Please contact Admin to sync your account.",
+        message: "Financial profile missing. Please contact Admin to sync your account.",
       });
-    }
+    } 
 
-    // Check 2: Actual business logic validation
     if (amountInKobo > account.availableCreditLimit) {
       return res.status(400).json({
         message: `Request exceeds your available credit limit of ₦${(account.availableCreditLimit / 100).toLocaleString()}.`,
       });
-    }
-    // -------------------------------------------
+    } 
 
     const existingPending = await Loan.findOne({
-      cooperatorId: req.user._id,
+      cooperatorId: userId,
       status: { $in: ["PENDING_GUARANTORS", "PENDING_ADMIN", "APPROVED"] },
     });
+
     if (existingPending) {
-      return res
-        .status(400)
-        .json({ message: "You already have an active or pending loan." });
+      return res.status(400).json({ message: "You already have an active or pending loan." });
     }
 
     const g1 = await Cooperator.findOne({ fileNumber: guarantor1FileNumber });
     const g2 = await Cooperator.findOne({ fileNumber: guarantor2FileNumber });
 
     if (!g1 || !g2) {
-      return res
-        .status(404)
-        .json({ message: "One or both guarantor file numbers are invalid." });
-    }
-    if (
-      g1._id.toString() === req.user._id.toString() ||
-      g2._id.toString() === req.user._id.toString()
-    ) {
-      return res
-        .status(400)
-        .json({ message: "You cannot guarantee your own loan." });
+      return res.status(404).json({ message: "One or both guarantor file numbers are invalid." });
     }
 
-    const interestRate = 5; // 5% flat rate
+    if (
+      g1._id.toString() === userId.toString() ||
+      g2._id.toString() === userId.toString()
+    ) {
+      return res.status(400).json({ message: "You cannot guarantee your own loan." });
+    }
+
+    const interestRate = 5; 
     const interestAmount = Math.round(amountInKobo * (interestRate / 100));
     const amountDue = amountInKobo + interestAmount;
 
     const newLoan = new Loan({
-      cooperatorId: req.user._id,
+      cooperatorId: userId,
       amountRequested: amountInKobo,
       interestRate: interestRate,
       amountDue: amountDue,
@@ -116,49 +87,59 @@ router.post("/request", protect, async (req, res) => {
 
     await newLoan.save();
 
-    sendGuarantorRequestEmail(
-      g1.email,
-      req.user.firstName,
-      amountInKobo,
-      newLoan._id,
-    );
-    sendGuarantorRequestEmail(
-      g2.email,
-      req.user.firstName,
-      amountInKobo,
-      newLoan._id,
-    );
+    // 🚀 FIXED: AWAIT THE EMAILS SO THEY DO NOT GET CANCELLED BY THE SERVER
+    await Promise.all([
+      sendGuarantorRequestEmail(
+        g1.email,
+        currentUser.firstName,
+        amountInKobo,
+        newLoan._id,
+      ),
+      sendGuarantorRequestEmail(
+        g2.email,
+        currentUser.firstName,
+        amountInKobo,
+        newLoan._id,
+      )
+    ]);
 
-    // Save persistent notifications to the database
+    // 🚀 FIXED: ADD THE APPLICANT TO THE NOTIFICATION ARRAY
     await Notification.create([
+      {
+        user: userId, // Applicant gets a receipt
+        title: "Loan Application Submitted",
+        message: `Your loan request for ₦${(amountInKobo / 100).toLocaleString()} has been sent to your guarantors.`,
+        type: "info",
+      },
       {
         user: g1._id,
         title: "Guarantor Request",
-        message: `${req.user.firstName} requested you as a guarantor for a loan of ₦${(amountInKobo / 100).toLocaleString()}.`,
+        message: `${currentUser.firstName} requested you as a guarantor for a loan of ₦${(amountInKobo / 100).toLocaleString()}.`,
         type: "info",
       },
       {
         user: g2._id,
         title: "Guarantor Request",
-        message: `${req.user.firstName} requested you as a guarantor for a loan of ₦${(amountInKobo / 100).toLocaleString()}.`,
+        message: `${currentUser.firstName} requested you as a guarantor for a loan of ₦${(amountInKobo / 100).toLocaleString()}.`,
         type: "info",
       },
-    ]);
+    ]); 
 
-    // Trigger Live WebSockets if the guarantors are online
+    // Trigger Live WebSockets
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
 
     if (io && onlineUsers) {
+      const applicantSocket = onlineUsers.get(userId.toString());
       const g1Socket = onlineUsers.get(g1._id.toString());
       const g2Socket = onlineUsers.get(g2._id.toString());
 
-      const liveMessage = `${req.user.firstName} just requested you as a loan guarantor.`;
+      const liveMessage = `${currentUser.firstName} just requested you as a loan guarantor.`;
 
-      if (g1Socket)
-        io.to(g1Socket).emit("new_guarantor_request", { message: liveMessage });
-      if (g2Socket)
-        io.to(g2Socket).emit("new_guarantor_request", { message: liveMessage });
+      // 🚀 FIXED: Emit a generic update to the applicant so their bell turns red
+      if (applicantSocket) io.to(applicantSocket).emit("update_notifications");
+      if (g1Socket) io.to(g1Socket).emit("new_guarantor_request", { message: liveMessage });
+      if (g2Socket) io.to(g2Socket).emit("new_guarantor_request", { message: liveMessage });
     }
 
     res.status(201).json({
@@ -176,7 +157,8 @@ router.post("/request", protect, async (req, res) => {
 // @access  Private
 router.get("/my-loans", protect, async (req, res) => {
   try {
-    const loans = await Loan.find({ cooperatorId: req.user._id })
+    const userId = req.user.id || req.user._id;
+    const loans = await Loan.find({ cooperatorId: userId })
       .populate("guarantor1.cooperatorId", "firstName lastName fileNumber")
       .populate("guarantor2.cooperatorId", "firstName lastName fileNumber")
       .sort({ createdAt: -1 });
@@ -239,7 +221,8 @@ router.put("/:id/review", protect, admin, async (req, res) => {
 
     // Send email to the applicant
     if (loan.cooperatorId && loan.cooperatorId.email) {
-      sendLoanStatusEmail(
+      // 🚀 FIXED: Added await
+      await sendLoanStatusEmail(
         loan.cooperatorId.email,
         loan.cooperatorId.firstName,
         status,
@@ -254,6 +237,14 @@ router.put("/:id/review", protect, admin, async (req, res) => {
       message: `Your loan application for ₦${(loan.amountRequested / 100).toLocaleString()} was ${status.toLowerCase()} by the Admin.`,
       type: status === "APPROVED" ? "success" : "danger",
     });
+
+    // 🚀 NEW: Ping the applicant's bell icon
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+    if (io && onlineUsers) {
+      const targetSocket = onlineUsers.get(loan.cooperatorId._id.toString());
+      if (targetSocket) io.to(targetSocket).emit("update_notifications");
+    }
 
     res.status(200).json({
       message: `Loan successfully marked as ${status}`,
@@ -276,9 +267,11 @@ router.post("/:id/repay", protect, async (req, res) => {
       return res.status(400).json({ message: "Invalid repayment amount" });
     }
 
+    const userId = req.user.id || req.user._id;
+
     const loan = await Loan.findOne({
       _id: req.params.id,
-      cooperatorId: req.user._id,
+      cooperatorId: userId,
     });
 
     if (!loan) {
@@ -304,12 +297,20 @@ router.post("/:id/repay", protect, async (req, res) => {
 
     // Send a financial alert for the receipt
     await Notification.create({
-      user: req.user._id,
+      user: userId,
       title:
         loan.status === "REPAID" ? "Loan Fully Repaid" : "Payment Received",
       message: `Your repayment of ₦${(amountInKobo / 100).toLocaleString()} was processed successfully.${loan.status === "REPAID" ? " Your loan is now fully settled." : ""}`,
       type: "financial",
     });
+
+    // 🚀 NEW: Ping the user's bell icon
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+    if (io && onlineUsers) {
+      const targetSocket = onlineUsers.get(userId.toString());
+      if (targetSocket) io.to(targetSocket).emit("update_notifications");
+    }
 
     res.status(200).json({
       message:
@@ -327,14 +328,16 @@ router.post("/:id/repay", protect, async (req, res) => {
 // @access  Private
 router.get("/guarantor-requests", protect, async (req, res) => {
   try {
+    const userId = req.user.id || req.user._id;
+
     const requests = await Loan.find({
       $or: [
         {
-          "guarantor1.cooperatorId": req.user._id,
+          "guarantor1.cooperatorId": userId,
           "guarantor1.status": "PENDING",
         },
         {
-          "guarantor2.cooperatorId": req.user._id,
+          "guarantor2.cooperatorId": userId,
           "guarantor2.status": "PENDING",
         },
       ],
@@ -358,13 +361,18 @@ router.put("/:id/guarantee", protect, async (req, res) => {
       return res.status(400).json({ message: "Invalid action" });
     }
 
-    const loan = await Loan.findById(req.params.id);
+    // 🚀 FIXED: Populate the cooperator so we can inject their real name into the Admin email
+    const loan = await Loan.findById(req.params.id).populate(
+      "cooperatorId",
+      "firstName lastName",
+    );
     if (!loan) return res.status(404).json({ message: "Loan not found" });
 
-    const isG1 =
-      loan.guarantor1.cooperatorId.toString() === req.user._id.toString();
-    const isG2 =
-      loan.guarantor2.cooperatorId.toString() === req.user._id.toString();
+    // 🚀 FIXED: Safely extract the guarantor's ID from the JWT payload
+    const userId = req.user.id || req.user._id;
+
+    const isG1 = loan.guarantor1.cooperatorId.toString() === userId.toString();
+    const isG2 = loan.guarantor2.cooperatorId.toString() === userId.toString();
 
     if (!isG1 && !isG2) {
       return res
@@ -385,14 +393,17 @@ router.put("/:id/guarantee", protect, async (req, res) => {
       const admins = await Cooperator.find({
         role: { $in: ["ADMIN", "SUPER_ADMIN"] },
       });
-      admins.forEach((admin) => {
+
+      // 🚀 FIXED: Await the email transporter and inject the applicant's real name
+      const emailPromises = admins.map((admin) =>
         sendAdminApprovalEmail(
           admin.email,
-          "A Cooperator",
+          `${loan.cooperatorId.firstName} ${loan.cooperatorId.lastName}`, // Real name injected
           loan.amountRequested,
           loan._id,
-        );
-      });
+        ),
+      );
+      await Promise.all(emailPromises);
     } else if (action === "DECLINED") {
       loan.status = "REJECTED";
       loan.adminComment =
@@ -403,17 +414,26 @@ router.put("/:id/guarantee", protect, async (req, res) => {
 
     // Notify the applicant of the guarantor's decision
     await Notification.create({
-      user: loan.cooperatorId,
+      user: loan.cooperatorId._id,
       title: `Guarantor ${action === "ACCEPTED" ? "Accepted" : "Declined"}`,
       message: `A guarantor has ${action.toLowerCase()} your request.`,
       type: action === "ACCEPTED" ? "success" : "danger",
     });
+
+    // 🚀 NEW: Ping the applicant's bell icon
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+    if (io && onlineUsers) {
+      const targetSocket = onlineUsers.get(loan.cooperatorId._id.toString());
+      if (targetSocket) io.to(targetSocket).emit("update_notifications");
+    }
 
     res.status(200).json({
       message: `Successfully ${action.toLowerCase()} the request.`,
       loan,
     });
   } catch (error) {
+    console.error("Guarantor Action Error:", error);
     res.status(500).json({ message: "Server error processing guarantee" });
   }
 });
