@@ -3,38 +3,42 @@ import jwt from "jsonwebtoken";
 export const protect = (req, res, next) => {
   let token;
 
-  // Check if the authorization header exists and starts with 'Bearer'
-  if (
+  // 🚀 FIX 3: Check for the token in the HttpOnly cookie first
+  if (req.cookies && req.cookies.coop_token) {
+    token = req.cookies.coop_token;
+  }
+  // Fallback to Bearer token for easier Postman testing during development
+  else if (
     req.headers.authorization &&
     req.headers.authorization.startsWith("Bearer")
   ) {
-    try {
-      // Get the token from the header (Format: "Bearer <token>")
-      token = req.headers.authorization.split(" ")[1];
-
-      // Verify the token using your secret key
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-      // Attach the decoded user payload (id, fileNumber, role) to the request object
-      // so the next route knows exactly who is making the request
-      req.user = decoded;
-
-      // Move on to the actual route handler
-      next();
-    } catch (error) {
-      console.error("Token verification failed:", error.message);
-      return res.status(401).json({ message: "Not authorized, token failed" });
-    }
+    token = req.headers.authorization.split(" ")[1];
   }
 
+  // If no token is found in either cookies or headers, block access
   if (!token) {
     return res
       .status(401)
       .json({ message: "Not authorized, no token provided" });
   }
+
+  try {
+    // Verify the token using your secret key
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Attach the decoded user payload (id, fileNumber, role) to the request object
+    // so the next route knows exactly who is making the request
+    req.user = decoded;
+
+    // Move on to the actual route handler
+    next();
+  } catch (error) {
+    console.error("Token verification failed:", error.message);
+    return res.status(401).json({ message: "Not authorized, token failed" });
+  }
 };
 
-// NEW: Admin Checkpoint
+// Admin Checkpoint
 export const admin = (req, res, next) => {
   // Check if the user exists AND their role is an Admin variant
   if (

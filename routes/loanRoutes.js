@@ -53,6 +53,21 @@ router.post("/request", protect, async (req, res) => {
       });
     }
 
+    // 🚀 FIX 1: ENFORCE 6-MONTH PROBATION RULE
+    // (Currently commented out for testing purposes)
+    /*
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    
+    const joinDate = currentUser.dateJoined || currentUser.createdAt;
+    
+    if (new Date(joinDate) > sixMonthsAgo) {
+      return res.status(403).json({
+        message: "Probation Active: You must be a registered member for at least 6 months to unlock loan eligibility.",
+      });
+    }
+    */
+
     if (amountInKobo > account.availableCreditLimit) {
       return res.status(400).json({
         message: `Request exceeds your available credit limit of ₦${(account.availableCreditLimit / 100).toLocaleString()}.`,
@@ -277,45 +292,54 @@ router.post("/:id/repay", protect, async (req, res) => {
 
     const userId = req.user.id || req.user._id;
 
-    const [loan, account] = await Promise.all([
-      Loan.findOne({ _id: req.params.id, cooperatorId: userId }),
-      Account.findOne({ cooperatorId: userId }),
-    ]);
-
+    // 1. Fetch Loan first to calculate exact actualRepayment
+    const loan = await Loan.findOne({ _id: req.params.id, cooperatorId: userId });
+    
     if (!loan) return res.status(404).json({ message: "Loan not found" });
-    if (!account)
-      return res.status(404).json({ message: "Financial account not found" });
-    if (loan.status !== "APPROVED")
-      return res
-        .status(400)
-        .json({ message: "You can only make payments on APPROVED loans" });
-
-    // Verify Sufficient Funds
-    if (account.totalSavings < amountInKobo) {
-      return res.status(400).json({
-        message: `Insufficient savings. Your balance is ₦${(account.totalSavings / 100).toLocaleString()}`,
-      });
+    if (loan.status !== "APPROVED") {
+      return res.status(400).json({ message: "You can only make payments on APPROVED loans" });
     }
 
     const targetRepayment = loan.amountDue || loan.amountRequested;
     const remainingBalance = targetRepayment - loan.amountRepaid;
     const actualRepayment = Math.min(amountInKobo, remainingBalance);
 
+    // 🚀 FIX 2: Atomic Database Deduction (Prevents Double-Spend)
+    // We only deduct IF totalSavings is greater than or equal to the repayment.
+    const account = await Account.findOneAndUpdate(
+      { 
+        cooperatorId: userId, 
+        totalSavings: { $gte: actualRepayment } // Strict DB-level check
+      },
+      {
+        $inc: {
+          totalSavings: -actualRepayment,
+          availableCreditLimit: -(actualRepayment * 2) // Maintain the 2x ratio atomically
+        }
+      },
+      { new: true } // Return the updated document
+    );
+
+    if (!account) {
+      return res.status(400).json({
+        message: "Insufficient savings to process this repayment. Transaction aborted.",
+      });
+    }
+
+    // 3. Update Loan Status
     loan.amountRepaid += actualRepayment;
     if (loan.amountRepaid >= targetRepayment) {
       loan.status = "REPAID";
       loan.amountRepaid = targetRepayment;
     }
+    await loan.save();
 
-    account.totalSavings -= actualRepayment;
-    account.availableCreditLimit = account.totalSavings * 2;
-
-    await Promise.all([loan.save(), account.save()]);
-
+    // 4. Log Transaction
     const currentMonthString = new Date().toLocaleString("en-GB", {
       month: "long",
       year: "numeric",
     });
+    
     await Transaction.create({
       cooperatorId: userId,
       type: "DEBIT",
@@ -327,8 +351,7 @@ router.post("/:id/repay", protect, async (req, res) => {
 
     await Notification.create({
       user: userId,
-      title:
-        loan.status === "REPAID" ? "Loan Fully Repaid" : "Payment Received",
+      title: loan.status === "REPAID" ? "Loan Fully Repaid" : "Payment Received",
       message: `Your repayment of ₦${(actualRepayment / 100).toLocaleString()} was processed successfully and deducted from your savings.${loan.status === "REPAID" ? " Your loan is now fully settled." : ""}`,
       type: "financial",
     });
@@ -341,11 +364,11 @@ router.post("/:id/repay", protect, async (req, res) => {
     }
 
     res.status(200).json({
-      message:
-        loan.status === "REPAID" ? "Loan fully repaid!" : "Payment successful",
+      message: loan.status === "REPAID" ? "Loan fully repaid!" : "Payment successful",
       loan,
     });
   } catch (error) {
+    console.error("Repayment Error:", error);
     res.status(500).json({ message: "Server error processing repayment" });
   }
 });

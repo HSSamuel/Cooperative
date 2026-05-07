@@ -2,7 +2,7 @@ import express from "express";
 import Account from "../models/Account.js";
 import Loan from "../models/Loan.js";
 import Notification from "../models/Notification.js";
-import Transaction from "../models/Transaction.js"; // 🚀 INTEGRATED TRANSACTION LEDGER
+import Transaction from "../models/Transaction.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
@@ -17,7 +17,7 @@ const getCurrentMonthString = () => {
 
 // @route   GET /api/account/my-account
 // @desc    Get the logged-in user's financial account data
-// @access  Private (Requires Token)
+// @access  Private
 router.get("/my-account", protect, async (req, res) => {
   try {
     const userId = req.user.id || req.user._id;
@@ -64,11 +64,10 @@ router.get("/transactions", protect, async (req, res) => {
 });
 
 // @route   POST /api/account/deposit
-// @desc    Log a physical cash/bank deposit (Admin Only until Payment Gateway is added)
+// @desc    Log a physical cash/bank deposit
 // @access  Private/Admin
 router.post("/deposit", protect, async (req, res) => {
   try {
-    // 🚨 THE FIX: Require the target user's ID
     const { amountInKobo, targetUserId } = req.body;
 
     if (!amountInKobo || amountInKobo <= 0 || !Number.isInteger(amountInKobo)) {
@@ -82,15 +81,21 @@ router.post("/deposit", protect, async (req, res) => {
         .json({ message: "Must specify the target Cooperator ID." });
     }
 
-    const account = await Account.findOne({ cooperatorId: targetUserId });
+    // 🚀 FIX 2 APPLIED HERE: Fully Atomic Deposit
+    const account = await Account.findOneAndUpdate(
+      { cooperatorId: targetUserId },
+      {
+        $inc: {
+          totalSavings: amountInKobo,
+          availableCreditLimit: amountInKobo * 2,
+        },
+      },
+      { new: true },
+    );
 
     if (!account) {
       return res.status(404).json({ message: "Account not found" });
     }
-
-    account.totalSavings += amountInKobo;
-    account.availableCreditLimit = account.totalSavings * 2;
-    await account.save();
 
     // LOG THE TRANSACTION
     await Transaction.create({
@@ -154,25 +159,46 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
         .json({ message: "Amount must be greater than zero." });
     }
 
-    const account = await Account.findOne({ cooperatorId });
-    if (!account)
-      return res.status(404).json({ message: "Account not found." });
+    let account;
 
+    // 🚀 FIX 2: Atomic Adjustments
     if (type === "CREDIT") {
-      account.totalSavings += amountInKobo;
+      account = await Account.findOneAndUpdate(
+        { cooperatorId },
+        {
+          $inc: {
+            totalSavings: amountInKobo,
+            availableCreditLimit: amountInKobo * 2,
+          },
+        },
+        { new: true },
+      );
     } else if (type === "DEBIT") {
-      if (account.totalSavings < amountInKobo) {
+      account = await Account.findOneAndUpdate(
+        {
+          cooperatorId,
+          totalSavings: { $gte: amountInKobo }, // DB-level validation
+        },
+        {
+          $inc: {
+            totalSavings: -amountInKobo,
+            availableCreditLimit: -(amountInKobo * 2),
+          },
+        },
+        { new: true },
+      );
+
+      if (!account) {
         return res.status(400).json({
           message: "Cannot debit more than the available total savings.",
         });
       }
-      account.totalSavings -= amountInKobo;
     } else {
       return res.status(400).json({ message: "Invalid adjustment type." });
     }
 
-    account.availableCreditLimit = account.totalSavings * 2;
-    await account.save();
+    if (!account)
+      return res.status(404).json({ message: "Account not found." });
 
     // 🚀 LOG THE TRANSACTION
     await Transaction.create({
@@ -221,21 +247,30 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       });
     }
 
-    const notificationsToInsert = [];
-    const transactionsToInsert = []; 
-    
-    // 🚀 NEW: Arrays to hold our bulk operations
-    const accountBulkOps = [];
-    const loanBulkOps = [];
-
     const currentMonth = getCurrentMonthString();
+    const BATCH_SIZE = 500; // 🚀 Limits RAM usage strictly
+
+    let accountsProcessed = 0;
+    let loansProcessedCount = 0;
+
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
 
     // ==========================================
-    // 1. PREPARE SAVINGS UPDATES
+    // 1. PROCESS SAVINGS VIA CURSOR STREAM
     // ==========================================
-    const accounts = await Account.find({ status: "ACTIVE" });
+    let accountBulkOps = [];
+    let savingsTransactions = [];
+    let savingsNotifications = [];
 
-    for (let account of accounts) {
+    // 🚀 Opens a memory-safe stream
+    const accountCursor = Account.find({ status: "ACTIVE" }).cursor();
+
+    for (
+      let account = await accountCursor.next();
+      account != null;
+      account = await accountCursor.next()
+    ) {
       const amountToSave =
         account.customMonthlySavings > 0
           ? account.customMonthlySavings
@@ -244,44 +279,92 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       const newTotalSavings = account.totalSavings + amountToSave;
       const newCreditLimit = newTotalSavings * 2;
 
-      // 🚀 THE FIX: Queue the update instead of saving immediately
       accountBulkOps.push({
         updateOne: {
           filter: { _id: account._id },
-          update: { 
-            totalSavings: newTotalSavings, 
-            availableCreditLimit: newCreditLimit 
-          }
-        }
+          update: {
+            totalSavings: newTotalSavings,
+            availableCreditLimit: newCreditLimit,
+          },
+        },
       });
 
-      // Queue Savings Transaction (CREDIT)
-      transactionsToInsert.push({
+      savingsTransactions.push({
         cooperatorId: account.cooperatorId,
         type: "CREDIT",
         amount: amountToSave,
         description: `Automated Payroll Savings - ${currentMonth}`,
         effectiveMonth: currentMonth,
-        balanceAfter: newTotalSavings, // Use the calculated value
+        balanceAfter: newTotalSavings,
       });
 
-      // Queue Savings Notification
-      notificationsToInsert.push({
+      savingsNotifications.push({
         user: account.cooperatorId,
         title: "Monthly Savings Deducted",
-        message: `Your monthly savings of ₦${(amountToSave / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })} has been successfully processed.`,
+        message: `Your monthly savings of ₦${(amountToSave / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })} has been successfully processed.`,
         type: "financial",
       });
+
+      accountsProcessed++;
+
+      // 🚀 EXECUTE BATCH IF IT HITS LIMIT (PREVENTS OOM)
+      if (accountBulkOps.length >= BATCH_SIZE) {
+        await Promise.all([
+          Account.bulkWrite(accountBulkOps),
+          Transaction.insertMany(savingsTransactions),
+          Notification.insertMany(savingsNotifications),
+        ]);
+
+        if (io && onlineUsers) {
+          savingsNotifications.forEach((notif) => {
+            const targetSocket = onlineUsers.get(notif.user.toString());
+            if (targetSocket) io.to(targetSocket).emit("update_notifications");
+          });
+        }
+
+        // Clear memory arrays
+        accountBulkOps = [];
+        savingsTransactions = [];
+        savingsNotifications = [];
+      }
+    }
+
+    // Execute remaining accounts in the pipeline
+    if (accountBulkOps.length > 0) {
+      await Promise.all([
+        Account.bulkWrite(accountBulkOps),
+        Transaction.insertMany(savingsTransactions),
+        Notification.insertMany(savingsNotifications),
+      ]);
+
+      if (io && onlineUsers) {
+        savingsNotifications.forEach((notif) => {
+          const targetSocket = onlineUsers.get(notif.user.toString());
+          if (targetSocket) io.to(targetSocket).emit("update_notifications");
+        });
+      }
     }
 
     // ==========================================
-    // 2. PREPARE LOAN DEDUCTIONS
+    // 2. PROCESS LOANS VIA CURSOR STREAM
     // ==========================================
-    const activeLoans = await Loan.find({ status: "APPROVED" }).populate("cooperatorId");
-    let loansProcessed = 0;
+    let loanBulkOps = [];
+    let loanTransactions = [];
+    let loanNotifications = [];
 
-    for (let loan of activeLoans) {
-      const userAccount = await Account.findOne({ cooperatorId: loan.cooperatorId._id });
+    // 🚀 Opens a memory-safe stream
+    const loanCursor = Loan.find({ status: "APPROVED" })
+      .populate("cooperatorId")
+      .cursor();
+
+    for (
+      let loan = await loanCursor.next();
+      loan != null;
+      loan = await loanCursor.next()
+    ) {
+      const userAccount = await Account.findOne({
+        cooperatorId: loan.cooperatorId._id,
+      });
       if (userAccount && userAccount.status !== "ACTIVE") {
         continue; // Skip deductions for inactive/suspended members
       }
@@ -299,56 +382,67 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         isFullyRepaid = true;
       }
 
-      loansProcessed++;
+      loansProcessedCount++;
       const remainingBalance = targetRepayment - newAmountRepaid;
 
-      // 🚀 THE FIX: Queue the update instead of saving immediately
       loanBulkOps.push({
         updateOne: {
           filter: { _id: loan._id },
           update: {
             amountRepaid: newAmountRepaid,
-            status: newStatus
-          }
-        }
+            status: newStatus,
+          },
+        },
       });
 
-      // Queue Loan Transaction (DEBIT)
-      transactionsToInsert.push({
+      loanTransactions.push({
         cooperatorId: loan.cooperatorId._id,
         type: "DEBIT",
         amount: monthlyInstallment,
-        description: `Automated Deduction: ${loan.loanType || 'Loan'} Repayment. Remaining Balance: ₦${(remainingBalance / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
+        description: `Automated Deduction: ${loan.loanType || "Loan"} Repayment. Remaining Balance: ₦${(remainingBalance / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`,
         effectiveMonth: currentMonth,
-        balanceAfter: userAccount ? userAccount.totalSavings : 0, 
+        balanceAfter: userAccount ? userAccount.totalSavings : 0,
       });
 
-      // Queue Loan Notification
-      notificationsToInsert.push({
+      loanNotifications.push({
         user: loan.cooperatorId._id,
         title: "Loan Installment Processed",
-        message: `Your monthly loan deduction of ₦${(monthlyInstallment / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })} was processed.${isFullyRepaid ? " Your loan is now fully repaid!" : ""}`,
+        message: `Your monthly loan deduction of ₦${(monthlyInstallment / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })} was processed.${isFullyRepaid ? " Your loan is now fully repaid!" : ""}`,
         type: "financial",
       });
+
+      // 🚀 EXECUTE BATCH IF IT HITS LIMIT (PREVENTS OOM)
+      if (loanBulkOps.length >= BATCH_SIZE) {
+        await Promise.all([
+          Loan.bulkWrite(loanBulkOps),
+          Transaction.insertMany(loanTransactions),
+          Notification.insertMany(loanNotifications),
+        ]);
+
+        if (io && onlineUsers) {
+          loanNotifications.forEach((notif) => {
+            const targetSocket = onlineUsers.get(notif.user.toString());
+            if (targetSocket) io.to(targetSocket).emit("update_notifications");
+          });
+        }
+
+        // Clear memory arrays
+        loanBulkOps = [];
+        loanTransactions = [];
+        loanNotifications = [];
+      }
     }
 
-    // ==========================================
-    // 3. 🚀 EXECUTE MASSIVE BULK WRITES
-    // ==========================================
-    // Promise.all runs these heavy DB queries concurrently!
-    await Promise.all([
-      accountBulkOps.length > 0 ? Account.bulkWrite(accountBulkOps) : Promise.resolve(),
-      loanBulkOps.length > 0 ? Loan.bulkWrite(loanBulkOps) : Promise.resolve(),
-      transactionsToInsert.length > 0 ? Transaction.insertMany(transactionsToInsert) : Promise.resolve(),
-      notificationsToInsert.length > 0 ? Notification.insertMany(notificationsToInsert) : Promise.resolve()
-    ]);
-    
-    // Emit live WebSocket events
-    if (notificationsToInsert.length > 0) {
-      const io = req.app.get("io");
-      const onlineUsers = req.app.get("onlineUsers");
+    // Execute remaining loans in the pipeline
+    if (loanBulkOps.length > 0) {
+      await Promise.all([
+        Loan.bulkWrite(loanBulkOps),
+        Transaction.insertMany(loanTransactions),
+        Notification.insertMany(loanNotifications),
+      ]);
+
       if (io && onlineUsers) {
-        notificationsToInsert.forEach(notif => {
+        loanNotifications.forEach((notif) => {
           const targetSocket = onlineUsers.get(notif.user.toString());
           if (targetSocket) io.to(targetSocket).emit("update_notifications");
         });
@@ -358,8 +452,8 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
     res.status(200).json({
       message: "Monthly Reconciliation Complete!",
       stats: {
-        savingsAccountsUpdated: accounts.length,
-        loansProcessed: loansProcessed,
+        savingsAccountsUpdated: accountsProcessed,
+        loansProcessed: loansProcessedCount,
       },
     });
   } catch (error) {

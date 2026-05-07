@@ -7,7 +7,10 @@ dotenv.config();
 
 // 1. Configure the Transporter (The Mailman)
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+  family: 4, // 🚀 THIS IS THE FIX: Forces IPv4 routing
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
