@@ -120,28 +120,26 @@ router.post("/request", protect, async (req, res) => {
 
     await newLoan.save();
 
-    // Non-blocking email execution
-    try {
-      await Promise.all([
-        sendGuarantorRequestEmail(
-          g1.email,
-          currentUser.firstName,
-          amountInKobo,
-          newLoan._id,
-        ),
-        sendGuarantorRequestEmail(
-          g2.email,
-          currentUser.firstName,
-          amountInKobo,
-          newLoan._id,
-        ),
-      ]);
-    } catch (emailError) {
+    // TRULY Non-blocking email execution
+    Promise.all([
+      sendGuarantorRequestEmail(
+        g1.email,
+        currentUser.firstName,
+        amountInKobo,
+        newLoan._id,
+      ),
+      sendGuarantorRequestEmail(
+        g2.email,
+        currentUser.firstName,
+        amountInKobo,
+        newLoan._id,
+      ),
+    ]).catch((emailError) => {
       console.error(
         "Non-fatal: Email delivery failed. Relying on in-app notifications.",
         emailError.message,
       );
-    }
+    });
 
     await Notification.create([
       {
@@ -426,6 +424,7 @@ router.put("/:id/guarantee", protect, async (req, res) => {
       const admins = await Cooperator.find({
         role: { $in: ["ADMIN", "SUPER_ADMIN"] },
       });
+      
       const emailPromises = admins.map((admin) =>
         sendAdminApprovalEmail(
           admin.email,
@@ -434,11 +433,12 @@ router.put("/:id/guarantee", protect, async (req, res) => {
           loan._id,
         ),
       );
-      try {
-        await Promise.all(emailPromises);
-      } catch (err) {
-        console.error("Non-fatal: Admin email failed", err);
-      }
+
+      // 🚀 THE FIX: Truly non-blocking background email execution
+      Promise.all(emailPromises).catch((err) => {
+        console.error("Non-fatal: Admin email failed in background", err.message);
+      });
+
     } else if (action === "DECLINED") {
       loan.status = "REJECTED";
       loan.adminComment =
@@ -468,6 +468,7 @@ router.put("/:id/guarantee", protect, async (req, res) => {
         loan,
       });
   } catch (error) {
+    console.error("Guarantor Action Error:", error);
     res.status(500).json({ message: "Server error processing guarantee" });
   }
 });
