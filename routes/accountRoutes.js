@@ -1,10 +1,19 @@
 import express from "express";
 import Account from "../models/Account.js";
-import Loan from "../models/Loan.js"; // 🚀 FIXED: Added missing Loan import for reconciliation
-import Notification from "../models/Notification.js"; // 🚀 NEW: Added Notification engine
+import Loan from "../models/Loan.js";
+import Notification from "../models/Notification.js";
+import Transaction from "../models/Transaction.js"; // 🚀 INTEGRATED TRANSACTION LEDGER
 import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+
+// Helper to get current Month/Year string (e.g., "October 2023")
+const getCurrentMonthString = () => {
+  return new Date().toLocaleString("en-GB", {
+    month: "long",
+    year: "numeric",
+  });
+};
 
 // @route   GET /api/account/my-account
 // @desc    Get the logged-in user's financial account data
@@ -13,7 +22,6 @@ router.get("/my-account", protect, async (req, res) => {
   try {
     const userId = req.user.id || req.user._id;
 
-    // The Atomic Upsert prevents React double-firing bugs
     const account = await Account.findOneAndUpdate(
       { cooperatorId: userId },
       {
@@ -27,12 +35,31 @@ router.get("/my-account", protect, async (req, res) => {
         upsert: true,
         setDefaultsOnInsert: true,
       },
+    ).populate(
+      "cooperatorId",
+      "firstName lastName email fileNumber dateJoined createdAt",
     );
 
     res.status(200).json(account);
   } catch (error) {
     console.error("Fetch Account Error:", error);
     res.status(500).json({ message: "Server error fetching account data" });
+  }
+});
+
+// @route   GET /api/account/transactions
+// @desc    Get the logged-in user's transaction ledger
+// @access  Private
+router.get("/transactions", protect, async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const transactions = await Transaction.find({ cooperatorId: userId }).sort({
+      createdAt: -1,
+    });
+    res.status(200).json(transactions);
+  } catch (error) {
+    console.error("Fetch Transactions Error:", error);
+    res.status(500).json({ message: "Server error fetching transactions" });
   }
 });
 
@@ -58,6 +85,16 @@ router.post("/deposit", protect, async (req, res) => {
     account.availableCreditLimit = account.totalSavings * 2;
     await account.save();
 
+    // 🚀 LOG THE TRANSACTION
+    await Transaction.create({
+      cooperatorId: userId,
+      type: "CREDIT",
+      amount: amountInKobo,
+      description: "Self-Initiated Deposit",
+      effectiveMonth: getCurrentMonthString(),
+      balanceAfter: account.totalSavings,
+    });
+
     // Notify the user of their deposit
     await Notification.create({
       user: userId,
@@ -66,7 +103,6 @@ router.post("/deposit", protect, async (req, res) => {
       type: "financial",
     });
 
-    // 🚀 NEW: Ping the user's bell icon
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
     if (io && onlineUsers) {
@@ -82,13 +118,12 @@ router.post("/deposit", protect, async (req, res) => {
 });
 
 // @route   GET /api/account/user/:cooperatorId
-// @desc    Get a specific user's financial account data (Admin Only)
-// @access  Private/Admin
 router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
   try {
     const account = await Account.findOne({
       cooperatorId: req.params.cooperatorId,
-    });
+    }).populate("cooperatorId");
+
     if (!account)
       return res
         .status(404)
@@ -102,8 +137,6 @@ router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
 });
 
 // @route   POST /api/account/admin-adjust
-// @desc    Manually Credit or Debit an account (Admin Only)
-// @access  Private/Admin
 router.post("/admin-adjust", protect, admin, async (req, res) => {
   try {
     const { cooperatorId, amountInKobo, type } = req.body;
@@ -134,7 +167,16 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
     account.availableCreditLimit = account.totalSavings * 2;
     await account.save();
 
-    // Notify the user that an Admin adjusted their account
+    // 🚀 LOG THE TRANSACTION
+    await Transaction.create({
+      cooperatorId: cooperatorId,
+      type: type,
+      amount: amountInKobo,
+      description: `Manual Ledger Adjustment (${type})`,
+      effectiveMonth: getCurrentMonthString(),
+      balanceAfter: account.totalSavings,
+    });
+
     await Notification.create({
       user: cooperatorId,
       title: "Admin Account Adjustment",
@@ -142,7 +184,6 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
       type: "financial",
     });
 
-    // 🚀 NEW: Ping the user's bell icon
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
     if (io && onlineUsers) {
@@ -161,25 +202,24 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
 });
 
 // @route   POST /api/account/run-reconciliation
-// @desc    Admin triggers monthly ledger updates after payroll clears
+// @desc    Run automated monthly payroll deductions for Savings and Loans
 // @access  Private/Admin
 router.post("/run-reconciliation", protect, admin, async (req, res) => {
   try {
     const { standardSavingsKobo } = req.body;
 
     if (!standardSavingsKobo || standardSavingsKobo <= 0) {
-      return res
-        .status(400)
-        .json({
-          message: "Must provide a valid standard savings amount in Kobo.",
-        });
+      return res.status(400).json({
+        message: "Must provide a valid standard savings amount in Kobo.",
+      });
     }
 
-    // Array to hold all mass-notifications so we can insert them into the DB at once (highly efficient)
     const notificationsToInsert = [];
+    const transactionsToInsert = []; // 🚀 BULK TRANSACTION ARRAY
 
     // 1. UPDATE SAVINGS (ONLY FOR ACTIVE ACCOUNTS)
     const accounts = await Account.find({ status: "ACTIVE" });
+    const currentMonth = getCurrentMonthString();
 
     for (let account of accounts) {
       const amountToSave =
@@ -192,57 +232,82 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
 
       await account.save();
 
-      // Queue the savings notification
+      // Queue Savings Transaction (CREDIT)
+      transactionsToInsert.push({
+        cooperatorId: account.cooperatorId,
+        type: "CREDIT",
+        amount: amountToSave,
+        description: `Automated Payroll Savings - ${currentMonth}`,
+        effectiveMonth: currentMonth,
+        balanceAfter: account.totalSavings,
+      });
+
+      // Queue Savings Notification
       notificationsToInsert.push({
         user: account.cooperatorId,
         title: "Monthly Savings Deducted",
-        message: `Your monthly savings of ₦${(amountToSave / 100).toLocaleString()} has been successfully processed.`,
+        message: `Your monthly savings of ₦${(amountToSave / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })} has been successfully processed.`,
         type: "financial",
       });
     }
 
     // 2. DEDUCT ALL ACTIVE LOAN INSTALLMENTS
-    const activeLoans = await Loan.find({ status: "APPROVED" }).populate(
-      "cooperatorId",
-    );
-
+    const activeLoans = await Loan.find({ status: "APPROVED" }).populate("cooperatorId");
     let loansProcessed = 0;
 
     for (let loan of activeLoans) {
-      const userAccount = await Account.findOne({
-        cooperatorId: loan.cooperatorId._id,
-      });
+      const userAccount = await Account.findOne({ cooperatorId: loan.cooperatorId._id });
       if (userAccount && userAccount.status !== "ACTIVE") {
-        continue; // Skip to the next loan if the user is paused
+        continue; // Skip deductions for inactive/suspended members
       }
 
       const targetRepayment = loan.amountDue || loan.amountRequested;
-      const monthlyInstallment = Math.round(targetRepayment * 0.1); // 10% monthly deduction
+      const monthlyInstallment = Math.round(targetRepayment * 0.1); // Assuming 10% monthly
 
       loan.amountRepaid += monthlyInstallment;
+      let isFullyRepaid = false;
 
       if (loan.amountRepaid >= targetRepayment) {
         loan.amountRepaid = targetRepayment;
         loan.status = "REPAID";
+        isFullyRepaid = true;
       }
 
       await loan.save();
       loansProcessed++;
 
-      // Queue the loan deduction notification
+      // 🚀 TRANSPARENT LOAN DEBIT LOGGING
+      // Calculates exactly what the user owes after this deduction
+      const remainingBalance = targetRepayment - loan.amountRepaid;
+
+      // Queue Loan Transaction (DEBIT)
+      transactionsToInsert.push({
+        cooperatorId: loan.cooperatorId._id,
+        type: "DEBIT",
+        amount: monthlyInstallment,
+        description: `Automated Deduction: ${loan.loanType || 'Loan'} Repayment. Remaining Balance: ₦${(remainingBalance / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
+        effectiveMonth: currentMonth,
+        balanceAfter: userAccount.totalSavings, 
+      });
+
+      // Queue Loan Notification
       notificationsToInsert.push({
         user: loan.cooperatorId._id,
         title: "Loan Installment Processed",
-        message: `Your monthly loan deduction of ₦${(monthlyInstallment / 100).toLocaleString()} was processed.${loan.status === "REPAID" ? " Your loan is now fully repaid!" : ""}`,
+        message: `Your monthly loan deduction of ₦${(monthlyInstallment / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })} was processed.${isFullyRepaid ? " Your loan is now fully repaid!" : ""}`,
         type: "financial",
       });
     }
 
-    // Bulk insert all generated notifications to the database instantly
+    // 3. EXECUTE BULK INSERTS TO MONGODB
+    if (transactionsToInsert.length > 0) {
+      await Transaction.insertMany(transactionsToInsert);
+    }
+    
     if (notificationsToInsert.length > 0) {
       await Notification.insertMany(notificationsToInsert);
       
-      // 🚀 NEW: Ping ALL affected users simultaneously
+      // Emit live WebSocket events to all affected users currently online
       const io = req.app.get("io");
       const onlineUsers = req.app.get("onlineUsers");
       if (io && onlineUsers) {
@@ -267,8 +332,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
 });
 
 // @route   PUT /api/account/user/:cooperatorId/settings
-// @desc    Update a user's account status and custom savings (Admin Only)
-// @access  Private/Admin
 router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
   try {
     const { status, customMonthlySavings } = req.body;
@@ -277,9 +340,7 @@ router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
       cooperatorId: req.params.cooperatorId,
     });
     if (!account)
-      return res
-        .status(404)
-        .json({ message: "Account not found for this user." });
+      return res.status(404).json({ message: "Account not found." });
 
     let messageStr = "An Admin has updated your account settings. ";
 
@@ -295,7 +356,6 @@ router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
 
     await account.save();
 
-    // 🚀 NEW: Notify the user of settings change
     await Notification.create({
       user: req.params.cooperatorId,
       title: "Account Settings Updated",
@@ -308,7 +368,6 @@ router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
       account,
     });
   } catch (error) {
-    console.error("Account Settings Update Error:", error);
     res
       .status(500)
       .json({ message: "Server error updating account settings." });
@@ -316,8 +375,6 @@ router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
 });
 
 // @route   GET /api/account/all-accounts
-// @desc    Get all accounts with user details for the Admin table
-// @access  Private/Admin
 router.get("/all-accounts", protect, admin, async (req, res) => {
   try {
     const accounts = await Account.find({}).populate(
@@ -331,8 +388,6 @@ router.get("/all-accounts", protect, admin, async (req, res) => {
 });
 
 // @route   GET /api/account/global-stats
-// @desc    Get total cooperative savings and member count for Admin Dashboard
-// @access  Private/Admin
 router.get("/global-stats", protect, admin, async (req, res) => {
   try {
     const accounts = await Account.find({});
@@ -349,7 +404,6 @@ router.get("/global-stats", protect, admin, async (req, res) => {
       activeMembersCount: activeMembersCount,
     });
   } catch (error) {
-    console.error("Global Stats Error:", error);
     res.status(500).json({ message: "Server error fetching global stats." });
   }
 });

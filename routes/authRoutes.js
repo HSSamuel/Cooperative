@@ -151,24 +151,28 @@ router.put("/profile", protect, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    // Update standard fields
     if (req.body.firstName) user.firstName = req.body.firstName;
     if (req.body.lastName) user.lastName = req.body.lastName;
     if (req.body.otherName !== undefined) user.otherName = req.body.otherName;
     if (req.body.email) user.email = req.body.email;
     if (req.body.avatarUrl) user.avatarUrl = req.body.avatarUrl;
 
+    // 🚀 UPDATE NEW BIO DATA FIELDS
+    if (req.body.gender !== undefined) user.gender = req.body.gender;
+    if (req.body.birthday !== undefined) user.birthday = req.body.birthday;
+    if (req.body.mobile !== undefined) user.mobile = req.body.mobile;
+    if (req.body.occupation !== undefined) user.occupation = req.body.occupation;
+
     const updatedUser = await user.save();
 
-    // 🚀 NEW: Track Profile Updates
     await Notification.create({
       user: updatedUser._id,
       title: "Profile Updated",
-      message:
-        "Your personal cooperative profile information was successfully updated.",
+      message: "Your personal cooperative profile information was successfully updated.",
       type: "system",
     });
 
-    // 🚀 NEW: Trigger Live WebSockets to ping the bell icon instantly
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
     if (io && onlineUsers) {
@@ -176,6 +180,7 @@ router.put("/profile", protect, async (req, res) => {
       if (userSocket) io.to(userSocket).emit("update_notifications");
     }
 
+    // Return the expanded user object
     res.status(200).json({
       _id: updatedUser._id,
       firstName: updatedUser.firstName,
@@ -185,6 +190,11 @@ router.put("/profile", protect, async (req, res) => {
       fileNumber: updatedUser.fileNumber,
       role: updatedUser.role,
       avatarUrl: updatedUser.avatarUrl,
+      gender: updatedUser.gender,
+      birthday: updatedUser.birthday,
+      mobile: updatedUser.mobile,
+      occupation: updatedUser.occupation,
+      dateJoined: updatedUser.dateJoined
     });
   } catch (error) {
     console.error("Profile Update Error:", error);
