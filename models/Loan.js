@@ -12,6 +12,12 @@ const loanSchema = new mongoose.Schema(
       required: true,
     },
 
+    loanType: {
+      type: String,
+      enum: ["REGULAR", "EMERGENCY", "COMMODITY", "EQUIPMENT"],
+      default: "REGULAR",
+    },
+
     // NEW: The Business Model (Interest)
     interestRate: {
       type: Number,

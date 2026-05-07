@@ -64,18 +64,25 @@ router.get("/transactions", protect, async (req, res) => {
 });
 
 // @route   POST /api/account/deposit
+// @desc    Log a physical cash/bank deposit (Admin Only until Payment Gateway is added)
+// @access  Private/Admin
 router.post("/deposit", protect, async (req, res) => {
   try {
-    const { amountInKobo } = req.body;
+    // 🚨 THE FIX: Require the target user's ID
+    const { amountInKobo, targetUserId } = req.body;
 
     if (!amountInKobo || amountInKobo <= 0 || !Number.isInteger(amountInKobo)) {
       return res.status(400).json({
         message: "Invalid deposit amount. Must be a positive integer in Kobo.",
       });
     }
+    if (!targetUserId) {
+      return res
+        .status(400)
+        .json({ message: "Must specify the target Cooperator ID." });
+    }
 
-    const userId = req.user.id || req.user._id;
-    const account = await Account.findOne({ cooperatorId: userId });
+    const account = await Account.findOne({ cooperatorId: targetUserId });
 
     if (!account) {
       return res.status(404).json({ message: "Account not found" });
@@ -85,32 +92,32 @@ router.post("/deposit", protect, async (req, res) => {
     account.availableCreditLimit = account.totalSavings * 2;
     await account.save();
 
-    // 🚀 LOG THE TRANSACTION
+    // LOG THE TRANSACTION
     await Transaction.create({
-      cooperatorId: userId,
+      cooperatorId: targetUserId,
       type: "CREDIT",
       amount: amountInKobo,
-      description: "Self-Initiated Deposit",
+      description: "Manual Deposit Logged by Admin",
       effectiveMonth: getCurrentMonthString(),
       balanceAfter: account.totalSavings,
     });
 
     // Notify the user of their deposit
     await Notification.create({
-      user: userId,
+      user: targetUserId,
       title: "Deposit Successful",
-      message: `Your deposit of ₦${(amountInKobo / 100).toLocaleString()} has been added to your savings.`,
+      message: `A deposit of ₦${(amountInKobo / 100).toLocaleString()} has been verified and added to your savings.`,
       type: "financial",
     });
 
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
     if (io && onlineUsers) {
-      const targetSocket = onlineUsers.get(userId.toString());
+      const targetSocket = onlineUsers.get(targetUserId.toString());
       if (targetSocket) io.to(targetSocket).emit("update_notifications");
     }
 
-    res.status(200).json({ message: "Deposit successful", account });
+    res.status(200).json({ message: "Deposit logged successfully", account });
   } catch (error) {
     console.error("Deposit Error:", error);
     res.status(500).json({ message: "Server error processing deposit" });
@@ -215,11 +222,18 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
     }
 
     const notificationsToInsert = [];
-    const transactionsToInsert = []; // 🚀 BULK TRANSACTION ARRAY
+    const transactionsToInsert = []; 
+    
+    // 🚀 NEW: Arrays to hold our bulk operations
+    const accountBulkOps = [];
+    const loanBulkOps = [];
 
-    // 1. UPDATE SAVINGS (ONLY FOR ACTIVE ACCOUNTS)
-    const accounts = await Account.find({ status: "ACTIVE" });
     const currentMonth = getCurrentMonthString();
+
+    // ==========================================
+    // 1. PREPARE SAVINGS UPDATES
+    // ==========================================
+    const accounts = await Account.find({ status: "ACTIVE" });
 
     for (let account of accounts) {
       const amountToSave =
@@ -227,10 +241,19 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
           ? account.customMonthlySavings
           : standardSavingsKobo;
 
-      account.totalSavings += amountToSave;
-      account.availableCreditLimit = account.totalSavings * 2;
+      const newTotalSavings = account.totalSavings + amountToSave;
+      const newCreditLimit = newTotalSavings * 2;
 
-      await account.save();
+      // 🚀 THE FIX: Queue the update instead of saving immediately
+      accountBulkOps.push({
+        updateOne: {
+          filter: { _id: account._id },
+          update: { 
+            totalSavings: newTotalSavings, 
+            availableCreditLimit: newCreditLimit 
+          }
+        }
+      });
 
       // Queue Savings Transaction (CREDIT)
       transactionsToInsert.push({
@@ -239,7 +262,7 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         amount: amountToSave,
         description: `Automated Payroll Savings - ${currentMonth}`,
         effectiveMonth: currentMonth,
-        balanceAfter: account.totalSavings,
+        balanceAfter: newTotalSavings, // Use the calculated value
       });
 
       // Queue Savings Notification
@@ -251,7 +274,9 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       });
     }
 
-    // 2. DEDUCT ALL ACTIVE LOAN INSTALLMENTS
+    // ==========================================
+    // 2. PREPARE LOAN DEDUCTIONS
+    // ==========================================
     const activeLoans = await Loan.find({ status: "APPROVED" }).populate("cooperatorId");
     let loansProcessed = 0;
 
@@ -264,21 +289,29 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       const targetRepayment = loan.amountDue || loan.amountRequested;
       const monthlyInstallment = Math.round(targetRepayment * 0.1); // Assuming 10% monthly
 
-      loan.amountRepaid += monthlyInstallment;
+      let newAmountRepaid = loan.amountRepaid + monthlyInstallment;
+      let newStatus = "APPROVED";
       let isFullyRepaid = false;
 
-      if (loan.amountRepaid >= targetRepayment) {
-        loan.amountRepaid = targetRepayment;
-        loan.status = "REPAID";
+      if (newAmountRepaid >= targetRepayment) {
+        newAmountRepaid = targetRepayment;
+        newStatus = "REPAID";
         isFullyRepaid = true;
       }
 
-      await loan.save();
       loansProcessed++;
+      const remainingBalance = targetRepayment - newAmountRepaid;
 
-      // 🚀 TRANSPARENT LOAN DEBIT LOGGING
-      // Calculates exactly what the user owes after this deduction
-      const remainingBalance = targetRepayment - loan.amountRepaid;
+      // 🚀 THE FIX: Queue the update instead of saving immediately
+      loanBulkOps.push({
+        updateOne: {
+          filter: { _id: loan._id },
+          update: {
+            amountRepaid: newAmountRepaid,
+            status: newStatus
+          }
+        }
+      });
 
       // Queue Loan Transaction (DEBIT)
       transactionsToInsert.push({
@@ -287,7 +320,7 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         amount: monthlyInstallment,
         description: `Automated Deduction: ${loan.loanType || 'Loan'} Repayment. Remaining Balance: ₦${(remainingBalance / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
         effectiveMonth: currentMonth,
-        balanceAfter: userAccount.totalSavings, 
+        balanceAfter: userAccount ? userAccount.totalSavings : 0, 
       });
 
       // Queue Loan Notification
@@ -299,15 +332,19 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       });
     }
 
-    // 3. EXECUTE BULK INSERTS TO MONGODB
-    if (transactionsToInsert.length > 0) {
-      await Transaction.insertMany(transactionsToInsert);
-    }
+    // ==========================================
+    // 3. 🚀 EXECUTE MASSIVE BULK WRITES
+    // ==========================================
+    // Promise.all runs these heavy DB queries concurrently!
+    await Promise.all([
+      accountBulkOps.length > 0 ? Account.bulkWrite(accountBulkOps) : Promise.resolve(),
+      loanBulkOps.length > 0 ? Loan.bulkWrite(loanBulkOps) : Promise.resolve(),
+      transactionsToInsert.length > 0 ? Transaction.insertMany(transactionsToInsert) : Promise.resolve(),
+      notificationsToInsert.length > 0 ? Notification.insertMany(notificationsToInsert) : Promise.resolve()
+    ]);
     
+    // Emit live WebSocket events
     if (notificationsToInsert.length > 0) {
-      await Notification.insertMany(notificationsToInsert);
-      
-      // Emit live WebSocket events to all affected users currently online
       const io = req.app.get("io");
       const onlineUsers = req.app.get("onlineUsers");
       if (io && onlineUsers) {

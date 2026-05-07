@@ -1,4 +1,9 @@
 import nodemailer from "nodemailer";
+import dotenv from "dotenv";
+
+// 🚨 THE FIX: Force the environment variables to load right now,
+// BEFORE Nodemailer tries to build the transporter
+dotenv.config();
 
 // 1. Configure the Transporter (The Mailman)
 const transporter = nodemailer.createTransport({

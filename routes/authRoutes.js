@@ -6,14 +6,11 @@ import { sendPasswordResetEmail } from "../utils/emailService.js";
 import Cooperator from "../models/Cooperator.js";
 import Account from "../models/Account.js";
 import AuditLog from "../models/AuditLog.js";
-import Notification from "../models/Notification.js"; // 🚀 NEW: Notification Engine
+import Notification from "../models/Notification.js";
 import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// ==========================================
-// 1. REGISTER LOGIC
-// ==========================================
 router.post("/register", async (req, res) => {
   try {
     const { fileNumber, email, password, firstName, lastName, otherName } =
@@ -48,7 +45,6 @@ router.post("/register", async (req, res) => {
     });
     await newAccount.save();
 
-    // 🚀 NEW: Create a Welcome Notification
     await Notification.create({
       user: savedCooperator._id,
       title: "Welcome to ASCON Coop!",
@@ -67,9 +63,6 @@ router.post("/register", async (req, res) => {
   }
 });
 
-// ==========================================
-// 2. LOGIN LOGIC
-// ==========================================
 router.post("/login", async (req, res) => {
   try {
     const { fileNumber, password } = req.body;
@@ -96,14 +89,6 @@ router.post("/login", async (req, res) => {
       expiresIn: "1d",
     });
 
-    // 🚀 NEW: Security Notification for new logins
-    await Notification.create({
-      user: user._id,
-      title: "New Security Login",
-      message: "A new login was detected on your account.",
-      type: "system",
-    });
-
     res.status(200).json({
       message: "Login successful",
       token,
@@ -116,6 +101,12 @@ router.post("/login", async (req, res) => {
         role: user.role,
         avatarUrl: user.avatarUrl,
         fileNumber: user.fileNumber,
+        // 🚀 THE FIX: We must explicitly send these fields back on login
+        gender: user.gender,
+        birthday: user.birthday,
+        mobile: user.mobile,
+        occupation: user.occupation,
+        dateJoined: user.dateJoined || user.createdAt,
       },
     });
   } catch (error) {
@@ -124,9 +115,6 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// ==========================================
-// 3. ALL MEMBERS
-// ==========================================
 router.get("/all-members", async (req, res) => {
   try {
     const users = await Cooperator.find()
@@ -139,9 +127,6 @@ router.get("/all-members", async (req, res) => {
   }
 });
 
-// ==========================================
-// 4. UPDATE USER PROFILE
-// ==========================================
 router.put("/profile", protect, async (req, res) => {
   try {
     const userId = req.user.id || req.user._id;
@@ -151,25 +136,25 @@ router.put("/profile", protect, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Update standard fields
     if (req.body.firstName) user.firstName = req.body.firstName;
     if (req.body.lastName) user.lastName = req.body.lastName;
     if (req.body.otherName !== undefined) user.otherName = req.body.otherName;
     if (req.body.email) user.email = req.body.email;
     if (req.body.avatarUrl) user.avatarUrl = req.body.avatarUrl;
 
-    // 🚀 UPDATE NEW BIO DATA FIELDS
     if (req.body.gender !== undefined) user.gender = req.body.gender;
     if (req.body.birthday !== undefined) user.birthday = req.body.birthday;
     if (req.body.mobile !== undefined) user.mobile = req.body.mobile;
-    if (req.body.occupation !== undefined) user.occupation = req.body.occupation;
+    if (req.body.occupation !== undefined)
+      user.occupation = req.body.occupation;
 
     const updatedUser = await user.save();
 
     await Notification.create({
       user: updatedUser._id,
       title: "Profile Updated",
-      message: "Your personal cooperative profile information was successfully updated.",
+      message:
+        "Your personal cooperative profile information was successfully updated.",
       type: "system",
     });
 
@@ -180,7 +165,6 @@ router.put("/profile", protect, async (req, res) => {
       if (userSocket) io.to(userSocket).emit("update_notifications");
     }
 
-    // Return the expanded user object
     res.status(200).json({
       _id: updatedUser._id,
       firstName: updatedUser.firstName,
@@ -194,7 +178,7 @@ router.put("/profile", protect, async (req, res) => {
       birthday: updatedUser.birthday,
       mobile: updatedUser.mobile,
       occupation: updatedUser.occupation,
-      dateJoined: updatedUser.dateJoined
+      dateJoined: updatedUser.dateJoined,
     });
   } catch (error) {
     console.error("Profile Update Error:", error);
@@ -234,7 +218,6 @@ router.put("/update-password", protect, async (req, res) => {
     user.password = await bcrypt.hash(newPassword, salt);
     await user.save();
 
-    // 🚀 NEW: Track Security Changes
     await Notification.create({
       user: user._id,
       title: "Security Alert: Password Changed",
@@ -243,7 +226,6 @@ router.put("/update-password", protect, async (req, res) => {
       type: "danger",
     });
 
-    // 🚀 NEW: Trigger Live WebSockets to ping the bell icon
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
     if (io && onlineUsers) {
@@ -258,9 +240,6 @@ router.put("/update-password", protect, async (req, res) => {
   }
 });
 
-// ==========================================
-// 5. PASSWORD RECOVERY SYSTEM
-// ==========================================
 router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
@@ -335,7 +314,6 @@ router.put("/reset-password/:token", async (req, res) => {
     user.resetPasswordExpire = undefined;
     await user.save();
 
-    // 🚀 NEW: Track Password Recovery
     await Notification.create({
       user: user._id,
       title: "Password Successfully Recovered",
@@ -352,9 +330,6 @@ router.put("/reset-password/:token", async (req, res) => {
   }
 });
 
-// ==========================================
-// 6. SYSTEM AUDIT ENGINE
-// ==========================================
 router.get("/audit-logs", protect, async (req, res) => {
   try {
     if (req.user.role !== "ADMIN" && req.user.role !== "SUPER_ADMIN") {
