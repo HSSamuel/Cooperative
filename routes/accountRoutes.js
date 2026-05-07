@@ -90,7 +90,7 @@ router.post("/deposit", protect, async (req, res) => {
           availableCreditLimit: amountInKobo * 2,
         },
       },
-      { new: true },
+      { returnDocument: "after" },
     );
 
     if (!account) {
@@ -171,7 +171,7 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
             availableCreditLimit: amountInKobo * 2,
           },
         },
-        { new: true },
+        { returnDocument: "after" },
       );
     } else if (type === "DEBIT") {
       account = await Account.findOneAndUpdate(
@@ -185,7 +185,7 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
             availableCreditLimit: -(amountInKobo * 2),
           },
         },
-        { new: true },
+        { returnDocument: "after" },
       );
 
       if (!account) {

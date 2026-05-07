@@ -2,8 +2,6 @@ import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 import dns from "dns";
 
-// 🚨 THE FIX: Force the environment variables to load right now,
-// BEFORE Nodemailer tries to build the transporter
 dotenv.config();
 
 // 1. Configure the Transporter (The Mailman)
@@ -11,7 +9,7 @@ const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 465,
   secure: true,
-  // Pass a custom lookup function to strictly force IPv4
+  // 🚀 THE ULTIMATE FIX: Force Node.js to resolve the IPv4 address
   lookup: (hostname, options, callback) => {
     dns.lookup(hostname, { family: 4 }, (err, address, family) => {
       callback(err, address, family);
