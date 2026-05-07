@@ -7,9 +7,11 @@ dotenv.config();
 // 1. Configure the Transporter (The Mailman)
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  // 🚀 THE ULTIMATE FIX: Force Node.js to resolve the IPv4 address
+  port: 587,             // 🚀 Changed from 465 to 587
+  secure: false,         // 🚀 MUST be false for port 587
+  requireTLS: true,      // Forces the connection to upgrade to secure TLS
+  
+  // Keep the IPv4 override to completely kill the ENETUNREACH error
   lookup: (hostname, options, callback) => {
     dns.lookup(hostname, { family: 4 }, (err, address, family) => {
       callback(err, address, family);
@@ -17,7 +19,7 @@ const transporter = nodemailer.createTransport({
   },
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    pass: process.env.EMAIL_PASS, // Ensure this is a Google App Password, NOT your standard login password
   },
 });
 
