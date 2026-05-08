@@ -1,0 +1,13 @@
+import mongoose from "mongoose";
+
+const systemSettingSchema = new mongoose.Schema(
+  {
+    interestRate: { type: Number, default: 5.0 },
+    creditMultiplier: { type: Number, default: 2.0 },
+    maintenanceMode: { type: Boolean, default: false },
+    allowRegistrations: { type: Boolean, default: true },
+  },
+  { timestamps: true },
+);
+
+export default mongoose.model("SystemSetting", systemSettingSchema);

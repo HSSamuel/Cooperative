@@ -7,7 +7,6 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// Helper to get current Month/Year string (e.g., "October 2023")
 const getCurrentMonthString = () => {
   return new Date().toLocaleString("en-GB", {
     month: "long",
@@ -15,9 +14,6 @@ const getCurrentMonthString = () => {
   });
 };
 
-// @route   GET /api/account/my-account
-// @desc    Get the logged-in user's financial account data
-// @access  Private
 router.get("/my-account", protect, async (req, res) => {
   try {
     const userId = req.user.id || req.user._id;
@@ -47,15 +43,18 @@ router.get("/my-account", protect, async (req, res) => {
   }
 });
 
-// @route   GET /api/account/transactions
-// @desc    Get the logged-in user's transaction ledger
-// @access  Private
 router.get("/transactions", protect, async (req, res) => {
   try {
     const userId = req.user.id || req.user._id;
-    const transactions = await Transaction.find({ cooperatorId: userId }).sort({
+    // 🚀 LIMIT query variable added to prevent payload bloat (Redux over-fetching)
+    const limit = parseInt(req.query.limit) || 0;
+
+    let query = Transaction.find({ cooperatorId: userId }).sort({
       createdAt: -1,
     });
+    if (limit > 0) query = query.limit(limit);
+
+    const transactions = await query;
     res.status(200).json(transactions);
   } catch (error) {
     console.error("Fetch Transactions Error:", error);
@@ -63,9 +62,6 @@ router.get("/transactions", protect, async (req, res) => {
   }
 });
 
-// @route   POST /api/account/deposit
-// @desc    Log a physical cash/bank deposit
-// @access  Private/Admin
 router.post("/deposit", protect, async (req, res) => {
   try {
     const { amountInKobo, targetUserId } = req.body;
@@ -81,7 +77,6 @@ router.post("/deposit", protect, async (req, res) => {
         .json({ message: "Must specify the target Cooperator ID." });
     }
 
-    // 🚀 FIX 2 APPLIED HERE: Fully Atomic Deposit
     const account = await Account.findOneAndUpdate(
       { cooperatorId: targetUserId },
       {
@@ -93,11 +88,8 @@ router.post("/deposit", protect, async (req, res) => {
       { returnDocument: "after" },
     );
 
-    if (!account) {
-      return res.status(404).json({ message: "Account not found" });
-    }
+    if (!account) return res.status(404).json({ message: "Account not found" });
 
-    // LOG THE TRANSACTION
     await Transaction.create({
       cooperatorId: targetUserId,
       type: "CREDIT",
@@ -107,7 +99,6 @@ router.post("/deposit", protect, async (req, res) => {
       balanceAfter: account.totalSavings,
     });
 
-    // Notify the user of their deposit
     await Notification.create({
       user: targetUserId,
       title: "Deposit Successful",
@@ -129,7 +120,6 @@ router.post("/deposit", protect, async (req, res) => {
   }
 });
 
-// @route   GET /api/account/user/:cooperatorId
 router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
   try {
     const account = await Account.findOne({
@@ -148,7 +138,6 @@ router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
   }
 });
 
-// @route   POST /api/account/admin-adjust
 router.post("/admin-adjust", protect, admin, async (req, res) => {
   try {
     const { cooperatorId, amountInKobo, type } = req.body;
@@ -161,7 +150,6 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
 
     let account;
 
-    // 🚀 FIX 2: Atomic Adjustments
     if (type === "CREDIT") {
       account = await Account.findOneAndUpdate(
         { cooperatorId },
@@ -177,7 +165,7 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
       account = await Account.findOneAndUpdate(
         {
           cooperatorId,
-          totalSavings: { $gte: amountInKobo }, // DB-level validation
+          totalSavings: { $gte: amountInKobo },
         },
         {
           $inc: {
@@ -200,7 +188,6 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
     if (!account)
       return res.status(404).json({ message: "Account not found." });
 
-    // 🚀 LOG THE TRANSACTION
     await Transaction.create({
       cooperatorId: cooperatorId,
       type: type,
@@ -234,9 +221,6 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
   }
 });
 
-// @route   POST /api/account/run-reconciliation
-// @desc    Run automated monthly payroll deductions for Savings and Loans
-// @access  Private/Admin
 router.post("/run-reconciliation", protect, admin, async (req, res) => {
   try {
     const { standardSavingsKobo } = req.body;
@@ -248,7 +232,7 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
     }
 
     const currentMonth = getCurrentMonthString();
-    const BATCH_SIZE = 500; // 🚀 Limits RAM usage strictly
+    const BATCH_SIZE = 500;
 
     let accountsProcessed = 0;
     let loansProcessedCount = 0;
@@ -256,14 +240,10 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
 
-    // ==========================================
-    // 1. PROCESS SAVINGS VIA CURSOR STREAM
-    // ==========================================
     let accountBulkOps = [];
     let savingsTransactions = [];
     let savingsNotifications = [];
 
-    // 🚀 Opens a memory-safe stream
     const accountCursor = Account.find({ status: "ACTIVE" }).cursor();
 
     for (
@@ -307,7 +287,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
 
       accountsProcessed++;
 
-      // 🚀 EXECUTE BATCH IF IT HITS LIMIT (PREVENTS OOM)
       if (accountBulkOps.length >= BATCH_SIZE) {
         await Promise.all([
           Account.bulkWrite(accountBulkOps),
@@ -322,14 +301,12 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
           });
         }
 
-        // Clear memory arrays
         accountBulkOps = [];
         savingsTransactions = [];
         savingsNotifications = [];
       }
     }
 
-    // Execute remaining accounts in the pipeline
     if (accountBulkOps.length > 0) {
       await Promise.all([
         Account.bulkWrite(accountBulkOps),
@@ -345,14 +322,10 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       }
     }
 
-    // ==========================================
-    // 2. PROCESS LOANS VIA CURSOR STREAM
-    // ==========================================
     let loanBulkOps = [];
     let loanTransactions = [];
     let loanNotifications = [];
 
-    // 🚀 Opens a memory-safe stream
     const loanCursor = Loan.find({ status: "APPROVED" })
       .populate("cooperatorId")
       .cursor();
@@ -366,11 +339,13 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         cooperatorId: loan.cooperatorId._id,
       });
       if (userAccount && userAccount.status !== "ACTIVE") {
-        continue; // Skip deductions for inactive/suspended members
+        continue;
       }
 
       const targetRepayment = loan.amountDue || loan.amountRequested;
-      const monthlyInstallment = Math.round(targetRepayment * 0.1); // Assuming 10% monthly
+      // 🚀 THE FIX: Calculate automated monthly deduction using the actual tenure
+      const loanTenure = loan.tenure || 10;
+      const monthlyInstallment = Math.round(targetRepayment / loanTenure);
 
       let newAmountRepaid = loan.amountRepaid + monthlyInstallment;
       let newStatus = "APPROVED";
@@ -411,7 +386,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         type: "financial",
       });
 
-      // 🚀 EXECUTE BATCH IF IT HITS LIMIT (PREVENTS OOM)
       if (loanBulkOps.length >= BATCH_SIZE) {
         await Promise.all([
           Loan.bulkWrite(loanBulkOps),
@@ -426,14 +400,12 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
           });
         }
 
-        // Clear memory arrays
         loanBulkOps = [];
         loanTransactions = [];
         loanNotifications = [];
       }
     }
 
-    // Execute remaining loans in the pipeline
     if (loanBulkOps.length > 0) {
       await Promise.all([
         Loan.bulkWrite(loanBulkOps),
@@ -462,7 +434,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
   }
 });
 
-// @route   PUT /api/account/user/:cooperatorId/settings
 router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
   try {
     const { status, customMonthlySavings } = req.body;
@@ -505,7 +476,6 @@ router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
   }
 });
 
-// @route   GET /api/account/all-accounts
 router.get("/all-accounts", protect, admin, async (req, res) => {
   try {
     const accounts = await Account.find({}).populate(
@@ -518,7 +488,6 @@ router.get("/all-accounts", protect, admin, async (req, res) => {
   }
 });
 
-// @route   GET /api/account/global-stats
 router.get("/global-stats", protect, admin, async (req, res) => {
   try {
     const accounts = await Account.find({});

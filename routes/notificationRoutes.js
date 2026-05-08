@@ -1,5 +1,5 @@
 import express from "express";
-import { protect } from "../middleware/authMiddleware.js";
+import { protect, admin } from "../middleware/authMiddleware.js";
 import Notification from "../models/Notification.js";
 
 const router = express.Router();
@@ -9,7 +9,8 @@ const router = express.Router();
 // @access  Private
 router.get("/", protect, async (req, res) => {
   try {
-    const notifications = await Notification.find({ user: req.user._id }).sort({
+    const userId = req.user.id || req.user._id; // 🚀 THE BUG FIX IS HERE
+    const notifications = await Notification.find({ user: userId }).sort({
       createdAt: -1,
     });
     res.json(notifications);
@@ -23,13 +24,13 @@ router.get("/", protect, async (req, res) => {
 // @access  Private
 router.put("/:id/read", protect, async (req, res) => {
   try {
+    const userId = req.user.id || req.user._id; // 🚀 BUG FIX
     const notification = await Notification.findById(req.params.id);
-    if (
-      !notification ||
-      notification.user.toString() !== req.user._id.toString()
-    ) {
+
+    if (!notification || notification.user.toString() !== userId.toString()) {
       return res.status(404).json({ message: "Notification not found" });
     }
+
     notification.isRead = true;
     await notification.save();
     res.json(notification);
@@ -43,8 +44,9 @@ router.put("/:id/read", protect, async (req, res) => {
 // @access  Private
 router.put("/read-all", protect, async (req, res) => {
   try {
+    const userId = req.user.id || req.user._id; // 🚀 BUG FIX
     await Notification.updateMany(
-      { user: req.user._id, isRead: false },
+      { user: userId, isRead: false },
       { isRead: true },
     );
     res.json({ message: "All notifications marked as read" });
@@ -58,17 +60,47 @@ router.put("/read-all", protect, async (req, res) => {
 // @access  Private
 router.delete("/:id", protect, async (req, res) => {
   try {
+    const userId = req.user.id || req.user._id; // 🚀 BUG FIX
     const notification = await Notification.findById(req.params.id);
-    if (
-      !notification ||
-      notification.user.toString() !== req.user._id.toString()
-    ) {
+
+    if (!notification || notification.user.toString() !== userId.toString()) {
       return res.status(404).json({ message: "Notification not found" });
     }
+
     await notification.deleteOne();
     res.json({ message: "Notification removed" });
   } catch (error) {
     res.status(500).json({ message: "Error deleting notification" });
+  }
+});
+
+// @route   POST /api/notifications/admin-send
+// @desc    Admin sends a direct notice to a user
+// @access  Private/Admin
+router.post("/admin-send", protect, admin, async (req, res) => {
+  try {
+    const { targetUserId, title, message, type } = req.body;
+
+    const notification = await Notification.create({
+      user: targetUserId,
+      title,
+      message,
+      type: type || "system",
+    });
+
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+    if (io && onlineUsers) {
+      const targetSocket = onlineUsers.get(targetUserId.toString());
+      if (targetSocket) io.to(targetSocket).emit("update_notifications");
+    }
+
+    res
+      .status(201)
+      .json({ message: "Notice dispatched successfully", notification });
+  } catch (error) {
+    console.error("Admin Notice Error:", error);
+    res.status(500).json({ message: "Error dispatching notification" });
   }
 });
 

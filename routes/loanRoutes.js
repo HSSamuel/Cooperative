@@ -3,6 +3,7 @@ import Loan from "../models/Loan.js";
 import Account from "../models/Account.js";
 import Cooperator from "../models/Cooperator.js";
 import Transaction from "../models/Transaction.js";
+import SystemSetting from "../models/SystemSetting.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
 import {
   sendGuarantorRequestEmail,
@@ -19,12 +20,12 @@ const router = express.Router();
 // @access  Private
 router.post("/request", protect, async (req, res) => {
   try {
-    // 🚀 THE FIX: Extracted loanType here to prevent the ReferenceError
     const {
       amountInKobo,
       guarantor1FileNumber,
       guarantor2FileNumber,
       loanType,
+      tenure,
     } = req.body;
 
     if (!amountInKobo || amountInKobo <= 0) {
@@ -53,8 +54,8 @@ router.post("/request", protect, async (req, res) => {
       });
     }
 
-    // 🚀 FIX 1: ENFORCE 6-MONTH PROBATION RULE
-    // (Currently commented out for testing purposes)
+    // 🚀 ENFORCE 6-MONTH PROBATION RULE
+    // (Currently commented out for testing purposes. Uncomment when ready for production.)
     /*
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
@@ -103,15 +104,31 @@ router.post("/request", protect, async (req, res) => {
         .json({ message: "You cannot guarantee your own loan." });
     }
 
-    const interestRate = 5;
-    const interestAmount = Math.round(amountInKobo * (interestRate / 100));
+    // 🚀 Fetch Dynamic Interest Rate from System Settings with 10% default
+    let currentInterestRate = 10;
+    try {
+      const settings = await SystemSetting.findOne();
+      if (settings && settings.interestRate !== undefined) {
+        currentInterestRate = settings.interestRate;
+      }
+    } catch (err) {
+      console.error(
+        "Could not fetch SystemSettings, using default interest rate.",
+      );
+    }
+
+    // 🚀 Calculate total interest dynamically based on the chosen tenure
+    const loanTenure = parseInt(tenure) || 10;
+    const totalInterestRate = currentInterestRate * (loanTenure / 10);
+    const interestAmount = Math.round(amountInKobo * (totalInterestRate / 100));
     const amountDue = amountInKobo + interestAmount;
 
     const newLoan = new Loan({
       cooperatorId: userId,
-      loanType: loanType || "REGULAR", // Now works flawlessly
+      loanType: loanType || "REGULAR",
       amountRequested: amountInKobo,
-      interestRate: interestRate,
+      tenure: loanTenure,
+      interestRate: currentInterestRate,
       amountDue: amountDue,
       guarantor1: { cooperatorId: g1._id },
       guarantor2: { cooperatorId: g2._id },
@@ -120,7 +137,6 @@ router.post("/request", protect, async (req, res) => {
 
     await newLoan.save();
 
-    // TRULY Non-blocking email execution
     Promise.all([
       sendGuarantorRequestEmail(
         g1.email,
@@ -162,7 +178,6 @@ router.post("/request", protect, async (req, res) => {
       },
     ]);
 
-    // Trigger Live WebSockets
     const io = req.app.get("io");
     const onlineUsers = req.app.get("onlineUsers");
 
@@ -289,68 +304,82 @@ router.post("/:id/repay", protect, async (req, res) => {
     }
 
     const userId = req.user.id || req.user._id;
+    const loan = await Loan.findOne({
+      _id: req.params.id,
+      cooperatorId: userId,
+    });
 
-    // 1. Fetch Loan first to calculate exact actualRepayment
-    const loan = await Loan.findOne({ _id: req.params.id, cooperatorId: userId });
-    
     if (!loan) return res.status(404).json({ message: "Loan not found" });
     if (loan.status !== "APPROVED") {
-      return res.status(400).json({ message: "You can only make payments on APPROVED loans" });
+      return res
+        .status(400)
+        .json({ message: "You can only make payments on APPROVED loans" });
     }
 
     const targetRepayment = loan.amountDue || loan.amountRequested;
     const remainingBalance = targetRepayment - loan.amountRepaid;
     const actualRepayment = Math.min(amountInKobo, remainingBalance);
 
-    // 🚀 FIX 2: Atomic Database Deduction (Prevents Double-Spend)
-    // We only deduct IF totalSavings is greater than or equal to the repayment.
     const account = await Account.findOneAndUpdate(
-      { 
-        cooperatorId: userId, 
-        totalSavings: { $gte: actualRepayment } // Strict DB-level check
+      {
+        cooperatorId: userId,
+        totalSavings: { $gte: actualRepayment },
       },
       {
         $inc: {
           totalSavings: -actualRepayment,
-          availableCreditLimit: -(actualRepayment * 2) // Maintain the 2x ratio atomically
-        }
+          availableCreditLimit: -(actualRepayment * 2),
+        },
       },
-      { new: true } // Return the updated document
+      { new: true },
     );
 
     if (!account) {
       return res.status(400).json({
-        message: "Insufficient savings to process this repayment. Transaction aborted.",
+        message:
+          "Insufficient savings to process this repayment. Transaction aborted.",
       });
     }
 
-    // 3. Update Loan Status
-    loan.amountRepaid += actualRepayment;
-    if (loan.amountRepaid >= targetRepayment) {
-      loan.status = "REPAID";
-      loan.amountRepaid = targetRepayment;
-    }
-    await loan.save();
+    const updatedLoan = await Loan.findOneAndUpdate(
+      { _id: req.params.id, cooperatorId: userId, status: "APPROVED" },
+      { $inc: { amountRepaid: actualRepayment } },
+      { new: true },
+    );
 
-    // 4. Log Transaction
+    if (!updatedLoan) {
+      return res
+        .status(400)
+        .json({ message: "Failed to update loan atomically." });
+    }
+
+    if (updatedLoan.amountRepaid >= targetRepayment) {
+      updatedLoan.status = "REPAID";
+      updatedLoan.amountRepaid = targetRepayment;
+      await updatedLoan.save();
+    }
+
     const currentMonthString = new Date().toLocaleString("en-GB", {
       month: "long",
       year: "numeric",
     });
-    
+
     await Transaction.create({
       cooperatorId: userId,
       type: "DEBIT",
       amount: actualRepayment,
-      description: `Self-Initiated Loan Repayment. Remaining Loan Balance: ₦${((targetRepayment - loan.amountRepaid) / 100).toLocaleString()}`,
+      description: `Self-Initiated Loan Repayment. Remaining Loan Balance: ₦${((targetRepayment - updatedLoan.amountRepaid) / 100).toLocaleString()}`,
       effectiveMonth: currentMonthString,
       balanceAfter: account.totalSavings,
     });
 
     await Notification.create({
       user: userId,
-      title: loan.status === "REPAID" ? "Loan Fully Repaid" : "Payment Received",
-      message: `Your repayment of ₦${(actualRepayment / 100).toLocaleString()} was processed successfully and deducted from your savings.${loan.status === "REPAID" ? " Your loan is now fully settled." : ""}`,
+      title:
+        updatedLoan.status === "REPAID"
+          ? "Loan Fully Repaid"
+          : "Payment Received",
+      message: `Your repayment of ₦${(actualRepayment / 100).toLocaleString()} was processed successfully and deducted from your savings.${updatedLoan.status === "REPAID" ? " Your loan is now fully settled." : ""}`,
       type: "financial",
     });
 
@@ -362,8 +391,11 @@ router.post("/:id/repay", protect, async (req, res) => {
     }
 
     res.status(200).json({
-      message: loan.status === "REPAID" ? "Loan fully repaid!" : "Payment successful",
-      loan,
+      message:
+        updatedLoan.status === "REPAID"
+          ? "Loan fully repaid!"
+          : "Payment successful",
+      loan: updatedLoan,
     });
   } catch (error) {
     console.error("Repayment Error:", error);
@@ -415,6 +447,12 @@ router.put("/:id/guarantee", protect, async (req, res) => {
     if (isG1) loan.guarantor1.status = action;
     if (isG2) loan.guarantor2.status = action;
 
+    // 🚀 NEW: Fetch the name of the guarantor taking the action
+    const actingGuarantor = await Cooperator.findById(userId);
+    const guarantorName = actingGuarantor
+      ? `${actingGuarantor.firstName} ${actingGuarantor.lastName}`
+      : "A guarantor";
+
     if (
       loan.guarantor1.status === "ACCEPTED" &&
       loan.guarantor2.status === "ACCEPTED"
@@ -424,7 +462,7 @@ router.put("/:id/guarantee", protect, async (req, res) => {
       const admins = await Cooperator.find({
         role: { $in: ["ADMIN", "SUPER_ADMIN"] },
       });
-      
+
       const emailPromises = admins.map((admin) =>
         sendAdminApprovalEmail(
           admin.email,
@@ -434,23 +472,43 @@ router.put("/:id/guarantee", protect, async (req, res) => {
         ),
       );
 
-      // 🚀 THE FIX: Truly non-blocking background email execution
       Promise.all(emailPromises).catch((err) => {
-        console.error("Non-fatal: Admin email failed in background", err.message);
+        console.error(
+          "Non-fatal: Admin email failed in background",
+          err.message,
+        );
       });
 
+      // 🚀 Create IN-APP notifications for ALL Admins so their bell rings!
+      const adminNotifications = admins.map((admin) => ({
+        user: admin._id,
+        title: "Action Required: Loan Review",
+        message: `${loan.cooperatorId.firstName} ${loan.cooperatorId.lastName} has a loan of ₦${(loan.amountRequested / 100).toLocaleString()} waiting for your executive approval.`,
+        type: "system",
+      }));
+      await Notification.insertMany(adminNotifications);
+
+      // 🚀 Trigger WebSockets so Admins' bell turns red instantly!
+      const io = req.app.get("io");
+      const onlineUsers = req.app.get("onlineUsers");
+      if (io && onlineUsers) {
+        admins.forEach((admin) => {
+          const adminSocket = onlineUsers.get(admin._id.toString());
+          if (adminSocket) io.to(adminSocket).emit("update_notifications");
+        });
+      }
     } else if (action === "DECLINED") {
       loan.status = "REJECTED";
-      loan.adminComment =
-        "Rejected automatically: A guarantor declined the risk.";
+      loan.adminComment = `Rejected automatically: ${guarantorName} declined the risk.`;
     }
 
     await loan.save();
 
+    // 🚀 NEW: Notification includes the specific guarantor's name
     await Notification.create({
       user: loan.cooperatorId._id,
       title: `Guarantor ${action === "ACCEPTED" ? "Accepted" : "Declined"}`,
-      message: `A guarantor has ${action.toLowerCase()} your request.`,
+      message: `${guarantorName} has ${action.toLowerCase()} your loan request.`,
       type: action === "ACCEPTED" ? "success" : "danger",
     });
 
@@ -461,12 +519,10 @@ router.put("/:id/guarantee", protect, async (req, res) => {
       if (targetSocket) io.to(targetSocket).emit("update_notifications");
     }
 
-    res
-      .status(200)
-      .json({
-        message: `Successfully ${action.toLowerCase()} the request.`,
-        loan,
-      });
+    res.status(200).json({
+      message: `Successfully ${action.toLowerCase()} the request.`,
+      loan,
+    });
   } catch (error) {
     console.error("Guarantor Action Error:", error);
     res.status(500).json({ message: "Server error processing guarantee" });

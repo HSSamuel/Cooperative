@@ -11,23 +11,25 @@ const loanSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-
     loanType: {
       type: String,
       enum: ["REGULAR", "EMERGENCY", "COMMODITY", "EQUIPMENT"],
       default: "REGULAR",
     },
-
-    // NEW: The Business Model (Interest)
+    // Repayment Tenure in Months
+    tenure: {
+      type: Number,
+      default: 10,
+    },
+    // The Business Model (Interest)
     interestRate: {
       type: Number,
-      default: 5, // Flat 5% interest rate
+      default: 10, // 🚀 NEW DEFAULT: 10% interest rate
     },
     amountDue: {
       type: Number,
       required: false, // Principal + Interest (false to support old test loans)
     },
-
     amountRepaid: {
       type: Number,
       default: 0,
