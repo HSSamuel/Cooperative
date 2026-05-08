@@ -3,6 +3,7 @@ import Account from "../models/Account.js";
 import Loan from "../models/Loan.js";
 import Notification from "../models/Notification.js";
 import Transaction from "../models/Transaction.js";
+import Cooperator from "../models/Cooperator.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
@@ -434,47 +435,64 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
   }
 });
 
-router.put("/user/:cooperatorId/settings", protect, admin, async (req, res) => {
-  try {
-    const { status, customMonthlySavings } = req.body;
+router.put(
+  "/user/:cooperatorId/settings",
+  protect,
+  admin,
+  async (req, res, next) => {
+    try {
+      // 🚀 FIX: Extract dateJoined from the request body
+      const { status, customMonthlySavings, dateJoined } = req.body;
 
-    const account = await Account.findOne({
-      cooperatorId: req.params.cooperatorId,
-    });
-    if (!account)
-      return res.status(404).json({ message: "Account not found." });
+      const account = await Account.findOne({
+        cooperatorId: req.params.cooperatorId,
+      });
 
-    let messageStr = "An Admin has updated your account settings. ";
+      if (!account) {
+        return res.status(404).json({ message: "Account not found." });
+      }
 
-    if (status) {
-      account.status = status;
-      messageStr += `Your status is now ${status}. `;
+      let messageStr = "An Admin has updated your account settings. ";
+
+      if (status) {
+        account.status = status;
+        messageStr += `Your status is now ${status}. `;
+      }
+
+      if (customMonthlySavings !== undefined) {
+        account.customMonthlySavings = customMonthlySavings;
+        messageStr += `Your custom monthly savings has been set to ₦${(customMonthlySavings / 100).toLocaleString()}. `;
+      }
+
+      await account.save();
+
+      // 🚀 FIX: Find the actual Cooperator document and update the dateJoined
+      if (dateJoined) {
+        const user = await Cooperator.findById(req.params.cooperatorId);
+        if (user) {
+          user.dateJoined = new Date(dateJoined);
+          await user.save();
+          messageStr += `Your official join date was updated to ${new Date(dateJoined).toLocaleDateString()}.`;
+        }
+      }
+
+      await Notification.create({
+        user: req.params.cooperatorId,
+        title: "Account Settings Updated",
+        message: messageStr.trim(),
+        type: "system",
+      });
+
+      res.status(200).json({
+        message: "Member account settings updated successfully.",
+        account,
+      });
+    } catch (error) {
+      // Passes errors to the global handler we set up earlier
+      next(error);
     }
-
-    if (customMonthlySavings !== undefined) {
-      account.customMonthlySavings = customMonthlySavings;
-      messageStr += `Your custom monthly savings has been set to ₦${(customMonthlySavings / 100).toLocaleString()}.`;
-    }
-
-    await account.save();
-
-    await Notification.create({
-      user: req.params.cooperatorId,
-      title: "Account Settings Updated",
-      message: messageStr.trim(),
-      type: "system",
-    });
-
-    res.status(200).json({
-      message: "Member account settings updated successfully.",
-      account,
-    });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Server error updating account settings." });
-  }
-});
+  },
+);
 
 router.get("/all-accounts", protect, admin, async (req, res) => {
   try {

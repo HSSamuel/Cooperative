@@ -77,4 +77,6 @@ const loanSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+loanSchema.index({ cooperatorId: 1, status: 1 });
+
 export default mongoose.model("Loan", loanSchema);

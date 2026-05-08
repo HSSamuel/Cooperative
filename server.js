@@ -12,6 +12,7 @@ import loanRoutes from "./routes/loanRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import systemRoutes from "./routes/systemRoutes.js";
+import { errorHandler } from "./middleware/errorMiddleware.js";
 
 dotenv.config();
 
@@ -78,6 +79,7 @@ app.use("/api/loans", loanRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/system", systemRoutes);
+app.use(errorHandler);
 
 app.get("/", (req, res) => {
   res.status(200).json({

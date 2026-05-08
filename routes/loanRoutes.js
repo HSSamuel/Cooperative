@@ -216,7 +216,8 @@ router.get("/my-loans", protect, async (req, res) => {
 
     res.status(200).json(loans);
   } catch (error) {
-    res.status(500).json({ message: "Server error fetching loans" });
+    // 🚀 Pass to global error handler
+    next(error);
   }
 });
 
