@@ -1,43 +1,9 @@
-import nodemailer from "nodemailer";
 import dotenv from "dotenv";
-import dns from "dns";
 
-// Force the environment variables to load before Nodemailer tries to build the transporter
 dotenv.config();
 
-// 1. Configure the Transporter (The Mailman)
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587, // 🚀 Changed to 587 to bypass Render's port 465 block
-  secure: false, // 🚀 MUST be false for port 587
-  requireTLS: true, // 🚀 Forces the connection to upgrade to secure TLS
-
-  // 🚀 Force IPv4 to completely prevent the ENETUNREACH IPv6 crash
-  lookup: (hostname, options, callback) => {
-    dns.lookup(hostname, { family: 4 }, (err, address, family) => {
-      callback(err, address, family);
-    });
-  },
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS, // Ensure this is your 16-character Google App Password
-  },
-});
-
-// 2. Generic Send Function
-const sendEmail = async ({ to, subject, html }) => {
-  try {
-    await transporter.sendMail({
-      from: `"ASCON Cooperative" <${process.env.EMAIL_USER}>`,
-      to,
-      subject,
-      html,
-    });
-    console.log(`✉️ Email securely sent to ${to}`);
-  } catch (error) {
-    console.error(`❌ Failed to send email to ${to}:`, error);
-  }
-};
+const BREVO_API_URL = "https://api.brevo.com/v3/smtp/email";
+const senderEmail = process.env.EMAIL_FROM;
 
 // Helper to reliably grab the frontend URL
 const getFrontendUrl = () =>
@@ -45,7 +11,44 @@ const getFrontendUrl = () =>
   process.env.NEXT_PUBLIC_FRONTEND_URL ||
   "http://localhost:3000";
 
-// 3. Pre-built HTML Templates for our specific actions
+// 1. Generic Send Function using Native Fetch (Bypasses Render SMTP Block)
+const sendEmail = async ({ to, subject, html }) => {
+  try {
+    const response = await fetch(BREVO_API_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "api-key": process.env.BREVO_API_KEY,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        sender: {
+          name: "ASCON Cooperative",
+          email: senderEmail,
+        },
+        to: [{ email: to }],
+        subject: subject,
+        htmlContent: html,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error(`❌ Brevo API Error sending to ${to}:`, errorData);
+      throw new Error("Failed to dispatch email via Brevo");
+    }
+
+    console.log(`✉️ Brevo: Email securely dispatched to ${to}`);
+  } catch (error) {
+    console.error(
+      `❌ Network/SDK failure sending email to ${to}:`,
+      error.message,
+    );
+    throw error;
+  }
+};
+
+// 2. Pre-built HTML Templates for our specific actions
 
 export const sendGuarantorRequestEmail = async (
   guarantorEmail,
@@ -164,30 +167,23 @@ export const sendLoanStatusEmail = async (
 };
 
 export const sendPasswordResetEmail = async (email, firstName, resetUrl) => {
-  try {
-    const mailOptions = {
-      from: `"ASCON Cooperative" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "Password Reset Request - ASCON Cooperative",
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
-          <h2 style="color: #1b5e3a;">Password Reset Request</h2>
-          <p>Hello ${firstName},</p>
-          <p>You recently requested to reset your password for your ASCON Cooperative account. Click the button below to reset it. <strong>This link is only valid for 10 minutes.</strong></p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${resetUrl}" style="background-color: #1b5e3a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Reset My Password</a>
-          </div>
-          <p>If you did not request a password reset, please ignore this email or reply to let us know. Your password will remain unchanged.</p>
-          <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
-          <p style="font-size: 12px; color: #64748b; text-align: center;">ASCON Cooperative Society &copy; ${new Date().getFullYear()}</p>
-        </div>
-      `,
-    };
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
+      <h2 style="color: #1b5e3a;">Password Reset Request</h2>
+      <p>Hello ${firstName},</p>
+      <p>You recently requested to reset your password for your ASCON Cooperative account. Click the button below to reset it. <strong>This link is only valid for 10 minutes.</strong></p>
+      <div style="text-align: center; margin: 30px 0;">
+        <a href="${resetUrl}" style="background-color: #1b5e3a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Reset My Password</a>
+      </div>
+      <p>If you did not request a password reset, please ignore this email or reply to let us know. Your password will remain unchanged.</p>
+      <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+      <p style="font-size: 12px; color: #64748b; text-align: center;">ASCON Cooperative Society &copy; ${new Date().getFullYear()}</p>
+    </div>
+  `;
 
-    await transporter.sendMail(mailOptions);
-    console.log(`✉️ Password reset email securely sent to ${email}`);
-  } catch (error) {
-    console.error("Error sending password reset email:", error);
-    throw new Error("Email could not be sent");
-  }
+  await sendEmail({
+    to: email,
+    subject: "Password Reset Request - ASCON Cooperative",
+    html,
+  });
 };
