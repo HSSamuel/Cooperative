@@ -1,9 +1,15 @@
+import { MailerSend, EmailParams, Sender, Recipient } from "mailersend";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const BREVO_API_URL = "https://api.brevo.com/v3/smtp/email";
-const senderEmail = process.env.EMAIL_FROM;
+// Initialize the MailerSend SDK
+const mailerSend = new MailerSend({
+  apiKey: process.env.MAILERSEND_API_KEY,
+});
+
+const senderEmail = process.env.EMAIL_FROM || "alerts@coop.asconalumni.org";
+const sentFrom = new Sender(senderEmail, "ASCON Cooperative");
 
 // Helper to reliably grab the frontend URL
 const getFrontendUrl = () =>
@@ -11,38 +17,24 @@ const getFrontendUrl = () =>
   process.env.NEXT_PUBLIC_FRONTEND_URL ||
   "http://localhost:3000";
 
-// 1. Generic Send Function using Native Fetch (Bypasses Render SMTP Block)
+// 1. Generic Send Function via MailerSend HTTP API (Bypasses Render Block)
 const sendEmail = async ({ to, subject, html }) => {
   try {
-    const response = await fetch(BREVO_API_URL, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "api-key": process.env.BREVO_API_KEY,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        sender: {
-          name: "ASCON Cooperative",
-          email: senderEmail,
-        },
-        to: [{ email: to }],
-        subject: subject,
-        htmlContent: html,
-      }),
-    });
+    const recipients = [new Recipient(to)];
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error(`❌ Brevo API Error sending to ${to}:`, errorData);
-      throw new Error("Failed to dispatch email via Brevo");
-    }
+    const emailParams = new EmailParams()
+      .setFrom(sentFrom)
+      .setTo(recipients)
+      .setSubject(subject)
+      .setHtml(html);
 
-    console.log(`✉️ Brevo: Email securely dispatched to ${to}`);
+    await mailerSend.email.send(emailParams);
+    console.log(`✉️ MailerSend: Email securely dispatched to ${to}`);
   } catch (error) {
+    // MailerSend attaches detailed error logs in the body
     console.error(
-      `❌ Network/SDK failure sending email to ${to}:`,
-      error.message,
+      `❌ MailerSend Error sending to ${to}:`,
+      error.body || error.message,
     );
     throw error;
   }
