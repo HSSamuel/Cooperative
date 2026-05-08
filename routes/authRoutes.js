@@ -89,11 +89,14 @@ router.post("/login", async (req, res) => {
       expiresIn: "1d",
     });
 
-    // 🚀 FIX: Cross-Domain Cookie Configuration
+    // Determine if the app is running in production
+    const isProduction = process.env.NODE_ENV === "production";
+
+    // 🚀 FIX: Environment-Aware Cookie Configuration
     res.cookie("coop_token", token, {
       httpOnly: true,
-      secure: true, // MUST be true for cross-site cookies
-      sameSite: "none", // MUST be "none" to allow Netlify to send the cookie to Render
+      secure: isProduction, // True for Render (HTTPS), False for localhost (HTTP)
+      sameSite: isProduction ? "none" : "lax", // 'none' for cross-domain, 'lax' for local
       maxAge: 24 * 60 * 60 * 1000, // 1 day
     });
 
@@ -121,12 +124,14 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// 🚀 NEW: Logout Route ensuring we target the exact same Cross-Domain configuration
+// 🚀 NEW: Logout Route ensuring we target the exact same Environment configuration
 router.post("/logout", (req, res) => {
+  const isProduction = process.env.NODE_ENV === "production";
+
   res.cookie("coop_token", "", {
     httpOnly: true,
-    secure: true, // Must exactly match the login config to be destroyed
-    sameSite: "none", // Must exactly match the login config to be destroyed
+    secure: isProduction, 
+    sameSite: isProduction ? "none" : "lax", 
     expires: new Date(0), // Instantly expire the cookie
   });
   res.status(200).json({ message: "Logged out successfully" });

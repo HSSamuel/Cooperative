@@ -6,7 +6,7 @@ dotenv.config();
 const runTest = async () => {
   console.log("🚀 Initializing Email Test Protocol...");
 
-  // IMPORTANT: Make sure this is your actual email!
+  // Replace this with the email address where you want to receive the test emails
   const myTestEmail = "hssamuel2024@gmail.com";
 
   try {
@@ -15,7 +15,12 @@ const runTest = async () => {
       await import("./utils/emailService.js");
 
     console.log("📨 Sending Test Guarantor Request...");
-    await sendGuarantorRequestEmail(myTestEmail, "Test Cooperator", 5000000);
+    await sendGuarantorRequestEmail(
+      myTestEmail,
+      "Test Cooperator",
+      5000000,
+      "test-loan-id-123", // Added mock loanId for the Magic Links
+    );
 
     console.log("📨 Sending Test Loan Approval...");
     await sendLoanStatusEmail(
@@ -26,13 +31,15 @@ const runTest = async () => {
     );
 
     console.log("✅ Engine executed successfully! Go check your inbox.");
-    process.exit(0);
+
+    // Note: process.exit(0) was intentionally removed here to prevent
+    // the Node.js event loop from crashing on Windows while sockets are closing.
   } catch (error) {
     console.error(
       "❌ Test Failed. Check your NodeMailer configuration:",
       error,
     );
-    process.exit(1);
+    // Note: process.exit(1) was intentionally removed here as well.
   }
 };
 

@@ -2,16 +2,17 @@ import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 import dns from "dns";
 
+// Force the environment variables to load before Nodemailer tries to build the transporter
 dotenv.config();
 
 // 1. Configure the Transporter (The Mailman)
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
-  port: 587,             // 🚀 Changed from 465 to 587
-  secure: false,         // 🚀 MUST be false for port 587
-  requireTLS: true,      // Forces the connection to upgrade to secure TLS
-  
-  // Keep the IPv4 override to completely kill the ENETUNREACH error
+  port: 587, // 🚀 Changed to 587 to bypass Render's port 465 block
+  secure: false, // 🚀 MUST be false for port 587
+  requireTLS: true, // 🚀 Forces the connection to upgrade to secure TLS
+
+  // 🚀 Force IPv4 to completely prevent the ENETUNREACH IPv6 crash
   lookup: (hostname, options, callback) => {
     dns.lookup(hostname, { family: 4 }, (err, address, family) => {
       callback(err, address, family);
@@ -19,7 +20,7 @@ const transporter = nodemailer.createTransport({
   },
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS, // Ensure this is a Google App Password, NOT your standard login password
+    pass: process.env.EMAIL_PASS, // Ensure this is your 16-character Google App Password
   },
 });
 
@@ -46,7 +47,6 @@ const getFrontendUrl = () =>
 
 // 3. Pre-built HTML Templates for our specific actions
 
-// 🚀 UPDATED: Now takes loanId and generates Magic Action Links
 export const sendGuarantorRequestEmail = async (
   guarantorEmail,
   applicantName,
@@ -88,7 +88,6 @@ export const sendGuarantorRequestEmail = async (
   });
 };
 
-// 🚀 NEW: Admin Email with Magic Action Links
 export const sendAdminApprovalEmail = async (
   adminEmail,
   applicantName,
@@ -171,7 +170,7 @@ export const sendPasswordResetEmail = async (email, firstName, resetUrl) => {
       to: email,
       subject: "Password Reset Request - ASCON Cooperative",
       html: `
-        <div style="font-family: Arial, sans-serif; max-w: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
           <h2 style="color: #1b5e3a;">Password Reset Request</h2>
           <p>Hello ${firstName},</p>
           <p>You recently requested to reset your password for your ASCON Cooperative account. Click the button below to reset it. <strong>This link is only valid for 10 minutes.</strong></p>
@@ -186,6 +185,7 @@ export const sendPasswordResetEmail = async (email, firstName, resetUrl) => {
     };
 
     await transporter.sendMail(mailOptions);
+    console.log(`✉️ Password reset email securely sent to ${email}`);
   } catch (error) {
     console.error("Error sending password reset email:", error);
     throw new Error("Email could not be sent");
