@@ -67,9 +67,9 @@ export const sendGuarantorRequestEmail = async (
         <p style="font-size: 16px;"><strong>${applicantName}</strong> has requested a cooperative loan of <strong>${amount}</strong> and has listed you as a guarantor.</p>
         <p style="font-size: 16px;">You can process this request immediately using the secure links below:</p>
         
-        <div style="display: flex; gap: 16px; justify-content: center; margin-top: 32px;">
-          <a href="${acceptUrl}" style="background-color: #1b5e3a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; flex: 1; text-align: center;">Accept Request</a>
-          <a href="${declineUrl}" style="background-color: #ef4444; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; flex: 1; text-align: center;">Decline Request</a>
+        <div style="text-align: center; margin-top: 32px; padding: 16px 0; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0;">
+          <a href="${acceptUrl}" style="color: #1b5e3a; font-size: 16px; text-decoration: none; font-weight: bold; margin-right: 30px;">✓ Accept Request</a>
+          <a href="${declineUrl}" style="color: #ef4444; font-size: 16px; text-decoration: none; font-weight: bold;">✕ Decline Request</a>
         </div>
         
         <p style="font-size: 14px; color: #64748b; margin-top: 24px; text-align: center;">Note: You will be asked to log in if your secure session has expired.</p>
@@ -108,9 +108,9 @@ export const sendAdminApprovalEmail = async (
         <p style="font-size: 16px;"><strong>${applicantName}</strong> has successfully secured both guarantors for their loan request of <strong>${amount}</strong>.</p>
         <p style="font-size: 16px;">This application is now awaiting your final executive review.</p>
         
-        <div style="display: flex; gap: 16px; justify-content: center; margin-top: 32px;">
-          <a href="${approveUrl}" style="background-color: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; flex: 1; text-align: center;">Approve Loan</a>
-          <a href="${rejectUrl}" style="background-color: #ef4444; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; flex: 1; text-align: center;">Reject Loan</a>
+        <div style="text-align: center; margin-top: 32px; padding: 16px 0; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0;">
+          <a href="${approveUrl}" style="color: #10b981; font-size: 16px; text-decoration: none; font-weight: bold; margin-right: 30px;">✓ Approve Loan</a>
+          <a href="${rejectUrl}" style="color: #ef4444; font-size: 16px; text-decoration: none; font-weight: bold;">✕ Reject Loan</a>
         </div>
         
         <p style="font-size: 14px; color: #64748b; margin-top: 24px; text-align: center;">Note: You will be asked to log in if your admin session has expired.</p>
@@ -145,8 +145,9 @@ export const sendLoanStatusEmail = async (
         <p style="font-size: 16px;">Hello ${applicantName},</p>
         <p style="font-size: 16px;">Your loan request for <strong>${amount}</strong> has been <strong>${status.toLowerCase()}</strong> by the cooperative administration.</p>
         ${isApproved ? '<p style="font-size: 16px;">The funds will be disbursed according to standard cooperative procedures.</p>' : '<p style="font-size: 16px;">If you have questions, please contact the cooperative administration.</p>'}
-        <div style="text-align: center; margin-top: 32px;">
-          <a href="${getFrontendUrl()}/dashboard/loans" style="background-color: #334155; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">View Your Ledger</a>
+        
+        <div style="text-align: center; margin-top: 32px; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+          <a href="${getFrontendUrl()}/dashboard/loans" style="color: #334155; font-size: 16px; text-decoration: none; font-weight: bold;">View Your Ledger &rarr;</a>
         </div>
       </div>
     </div>
@@ -163,10 +164,12 @@ export const sendPasswordResetEmail = async (email, firstName, resetUrl) => {
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
       <h2 style="color: #1b5e3a;">Password Reset Request</h2>
       <p>Hello ${firstName},</p>
-      <p>You recently requested to reset your password for your ASCON Cooperative account. Click the button below to reset it. <strong>This link is only valid for 10 minutes.</strong></p>
-      <div style="text-align: center; margin: 30px 0;">
-        <a href="${resetUrl}" style="background-color: #1b5e3a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Reset My Password</a>
+      <p>You recently requested to reset your password for your ASCON Cooperative account. Click the link below to reset it. <strong>This link is only valid for 10 minutes.</strong></p>
+      
+      <div style="text-align: center; margin: 30px 0; padding: 16px 0; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0;">
+        <a href="${resetUrl}" style="color: #1b5e3a; font-size: 18px; text-decoration: none; font-weight: bold;">Reset My Password &rarr;</a>
       </div>
+      
       <p>If you did not request a password reset, please ignore this email or reply to let us know. Your password will remain unchanged.</p>
       <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
       <p style="font-size: 12px; color: #64748b; text-align: center;">ASCON Cooperative Society &copy; ${new Date().getFullYear()}</p>
