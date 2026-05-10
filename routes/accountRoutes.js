@@ -65,7 +65,11 @@ router.get("/transactions", protect, async (req, res) => {
 
 router.post("/deposit", protect, async (req, res) => {
   try {
-    const { amountInKobo, targetUserId } = req.body;
+    const { amountInKobo, targetUserId, description } = req.body;
+
+    // 🚀 Identify who is making the request
+    const callerId = req.user.id || req.user._id;
+    const callerRole = req.user.role;
 
     if (!amountInKobo || amountInKobo <= 0 || !Number.isInteger(amountInKobo)) {
       return res.status(400).json({
@@ -91,11 +95,25 @@ router.post("/deposit", protect, async (req, res) => {
 
     if (!account) return res.status(404).json({ message: "Account not found" });
 
+    // 🚀 DYNAMIC DESCRIPTION LOGIC
+    let finalDescription = "Direct Savings Deposit";
+
+    if (description && description.trim() !== "") {
+      // 1. If a custom description was typed in the frontend, use it
+      finalDescription = description.trim();
+    } else if (callerId.toString() === targetUserId.toString()) {
+      // 2. If the user is depositing into their own account
+      finalDescription = "Self-Initiated Savings Deposit";
+    } else if (callerRole === "ADMIN" || callerRole === "SUPER_ADMIN") {
+      // 3. If an Admin is doing it for a member without typing a custom description
+      finalDescription = "Deposit Logged by Admin";
+    }
+
     await Transaction.create({
       cooperatorId: targetUserId,
       type: "CREDIT",
       amount: amountInKobo,
-      description: "Manual Deposit Logged by Admin",
+      description: finalDescription,
       effectiveMonth: getCurrentMonthString(),
       balanceAfter: account.totalSavings,
     });
@@ -132,7 +150,24 @@ router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
         .status(404)
         .json({ message: "Account not found for this user." });
 
-    res.status(200).json(account);
+    // 🚀 NEW: Dynamically calculate the real-time "Current Monthly Savings" from the Ledger
+    const currentMonthString = getCurrentMonthString();
+    const monthlyDeposits = await Transaction.find({
+      cooperatorId: req.params.cooperatorId,
+      type: "CREDIT",
+      effectiveMonth: currentMonthString,
+    });
+
+    const currentMonthSavings = monthlyDeposits.reduce(
+      (sum, txn) => sum + txn.amount,
+      0,
+    );
+
+    // Send back the account data along with the dynamically calculated real-time savings
+    res.status(200).json({
+      ...account.toObject(),
+      currentMonthSavings,
+    });
   } catch (error) {
     console.error("Fetch Admin Account Error:", error);
     res.status(500).json({ message: "Server error fetching account data" });

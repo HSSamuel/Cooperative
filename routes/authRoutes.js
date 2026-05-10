@@ -13,11 +13,14 @@ const router = express.Router();
 
 router.post("/register", async (req, res) => {
   try {
-    const { fileNumber, email, password, firstName, lastName, otherName } =
-      req.body;
+    const { fileNumber, email, password, firstName, lastName, otherName } = req.body;
+
+    // 🚀 FIX: Normalize inputs to prevent case/space mismatches
+    const normalizedFileNumber = fileNumber.replace(/\s+/g, "").toUpperCase();
+    const normalizedEmail = email.replace(/\s+/g, "").toLowerCase();
 
     const existingUser = await Cooperator.findOne({
-      $or: [{ email }, { fileNumber }],
+      $or: [{ email: normalizedEmail }, { fileNumber: normalizedFileNumber }],
     });
 
     if (existingUser)
@@ -29,12 +32,12 @@ router.post("/register", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, salt);
 
     const newCooperator = new Cooperator({
-      fileNumber,
-      email,
+      fileNumber: normalizedFileNumber,
+      email: normalizedEmail,
       password: hashedPassword,
-      firstName,
-      lastName,
-      otherName,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      otherName: otherName ? otherName.trim() : "",
     });
     const savedCooperator = await newCooperator.save();
 
@@ -67,7 +70,10 @@ router.post("/login", async (req, res) => {
   try {
     const { fileNumber, password } = req.body;
 
-    const user = await Cooperator.findOne({ fileNumber }).select("+password");
+    // 🚀 FIX: Normalize the file number before searching the database
+    const normalizedFileNumber = fileNumber.replace(/\s+/g, "").toUpperCase();
+
+    const user = await Cooperator.findOne({ fileNumber: normalizedFileNumber }).select("+password");
     if (!user)
       return res.status(400).json({
         message: "Invalid credentials. Please check your ASCON File Number.",
@@ -92,11 +98,10 @@ router.post("/login", async (req, res) => {
     // Determine if the app is running in production
     const isProduction = process.env.NODE_ENV === "production";
 
-    // 🚀 FIX: Environment-Aware Cookie Configuration
     res.cookie("coop_token", token, {
       httpOnly: true,
-      secure: isProduction, // True for Render (HTTPS), False for localhost (HTTP)
-      sameSite: isProduction ? "none" : "lax", // 'none' for cross-domain, 'lax' for local
+      secure: isProduction, 
+      sameSite: isProduction ? "none" : "lax", 
       maxAge: 24 * 60 * 60 * 1000, // 1 day
     });
 
@@ -125,7 +130,6 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// 🚀 NEW: Logout Route ensuring we target the exact same Environment configuration
 router.post("/logout", (req, res) => {
   const isProduction = process.env.NODE_ENV === "production";
 
@@ -266,7 +270,7 @@ router.put("/update-password", protect, async (req, res) => {
 router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
-    const user = await Cooperator.findOne({ email });
+    const user = await Cooperator.findOne({ email: email.trim().toLowerCase() });
 
     if (!user) {
       return res.status(200).json({
