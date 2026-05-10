@@ -2,6 +2,8 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import { z } from "zod";
+import { validate } from "../middleware/validate.js";
 import { sendPasswordResetEmail } from "../utils/emailService.js";
 import Cooperator from "../models/Cooperator.js";
 import Account from "../models/Account.js";
@@ -11,11 +13,29 @@ import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-router.post("/register", async (req, res) => {
-  try {
-    const { fileNumber, email, password, firstName, lastName, otherName } = req.body;
+const registerSchema = z.object({
+  body: z.object({
+    fileNumber: z.string().min(3, "Valid ASCON File Number is required"),
+    email: z.string().email("Invalid email address"),
+    password: z.string().min(6, "Password must be at least 6 characters"),
+    firstName: z.string().min(1, "First name is required"),
+    lastName: z.string().min(1, "Last name is required"),
+    otherName: z.string().optional(),
+  }),
+});
 
-    // 🚀 FIX: Normalize inputs to prevent case/space mismatches
+const loginSchema = z.object({
+  body: z.object({
+    fileNumber: z.string().min(3, "File Number is required"),
+    password: z.string().min(1, "Password is required"),
+  }),
+});
+
+router.post("/register", validate(registerSchema), async (req, res) => {
+  try {
+    const { fileNumber, email, password, firstName, lastName, otherName } =
+      req.body;
+
     const normalizedFileNumber = fileNumber.replace(/\s+/g, "").toUpperCase();
     const normalizedEmail = email.replace(/\s+/g, "").toLowerCase();
 
@@ -66,7 +86,7 @@ router.post("/register", async (req, res) => {
   }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", validate(loginSchema), async (req, res) => {
   try {
     const { fileNumber, password } = req.body;
     const normalizedFileNumber = fileNumber.replace(/\s+/g, "").toUpperCase();
@@ -86,7 +106,6 @@ router.post("/login", async (req, res) => {
       fileNumber: user.fileNumber,
     };
 
-    // Generate Short-Lived Access Token (15 mins) & Long-Lived Refresh Token (7 Days)
     const accessToken = jwt.sign(payload, process.env.JWT_SECRET, {
       expiresIn: "15m",
     });
@@ -96,25 +115,23 @@ router.post("/login", async (req, res) => {
 
     const isProduction = process.env.NODE_ENV === "production";
 
-    // Set Access Cookie
     res.cookie("coop_token", accessToken, {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? "none" : "lax",
-      maxAge: 15 * 60 * 1000, // 15 Minutes
+      maxAge: 15 * 60 * 1000,
     });
 
-    // Set Refresh Cookie
     res.cookie("coop_refresh_token", refreshToken, {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? "none" : "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 Days
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
     res.status(200).json({
       message: "Login successful",
-      token: accessToken, // Still returning for frontend edge-interception if needed
+      token: accessToken,
       user: {
         id: user._id,
         firstName: user.firstName,
@@ -134,9 +151,9 @@ router.post("/logout", (req, res) => {
 
   res.cookie("coop_token", "", {
     httpOnly: true,
-    secure: isProduction, 
-    sameSite: isProduction ? "none" : "lax", 
-    expires: new Date(0), // Instantly expire the cookie
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+    expires: new Date(0),
   });
   res.status(200).json({ message: "Logged out successfully" });
 });
@@ -269,7 +286,9 @@ router.put("/update-password", protect, async (req, res) => {
 router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
-    const user = await Cooperator.findOne({ email: email.trim().toLowerCase() });
+    const user = await Cooperator.findOne({
+      email: email.trim().toLowerCase(),
+    });
 
     if (!user) {
       return res.status(200).json({
@@ -289,19 +308,16 @@ router.post("/forgot-password", async (req, res) => {
 
     const resetUrl = `${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/reset-password/${resetToken}`;
 
-    try {
-      await sendPasswordResetEmail(user.email, user.firstName, resetUrl);
-      res.status(200).json({
-        message: "If that email is registered, a reset link has been sent.",
-      });
-    } catch (emailError) {
-      user.resetPasswordToken = undefined;
-      user.resetPasswordExpire = undefined;
-      await user.save();
-      return res
-        .status(500)
-        .json({ message: "Email could not be sent. Please try again later." });
-    }
+    // Fire-and-forget the email. Do not await it!
+    sendPasswordResetEmail(user.email, user.firstName, resetUrl).catch(
+      (emailError) =>
+        console.error("Non-fatal: Password reset email failed.", emailError),
+    );
+
+    // Immediately resolve the HTTP request
+    res.status(200).json({
+      message: "If that email is registered, a reset link has been sent.",
+    });
   } catch (error) {
     console.error("Forgot Password Error:", error);
     res.status(500).json({ message: "Server error processing request." });
@@ -384,10 +400,8 @@ router.post("/refresh", async (req, res) => {
         .json({ message: "Session expired. Please log in again." });
     }
 
-    // Verify the Refresh Token
     const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
 
-    // Issue a new Access Token
     const payload = {
       id: decoded.id,
       role: decoded.role,

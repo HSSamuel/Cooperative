@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import Account from "../models/Account.js";
 import Loan from "../models/Loan.js";
 import Notification from "../models/Notification.js";
@@ -47,7 +48,6 @@ router.get("/my-account", protect, async (req, res) => {
 router.get("/transactions", protect, async (req, res) => {
   try {
     const userId = req.user.id || req.user._id;
-    // 🚀 LIMIT query variable added to prevent payload bloat (Redux over-fetching)
     const limit = parseInt(req.query.limit) || 0;
 
     let query = Transaction.find({ cooperatorId: userId }).sort({
@@ -67,7 +67,6 @@ router.post("/deposit", protect, async (req, res) => {
   try {
     const { amountInKobo, targetUserId, description } = req.body;
 
-    // 🚀 Identify who is making the request
     const callerId = req.user.id || req.user._id;
     const callerRole = req.user.role;
 
@@ -95,17 +94,13 @@ router.post("/deposit", protect, async (req, res) => {
 
     if (!account) return res.status(404).json({ message: "Account not found" });
 
-    // 🚀 DYNAMIC DESCRIPTION LOGIC
     let finalDescription = "Direct Savings Deposit";
 
     if (description && description.trim() !== "") {
-      // 1. If a custom description was typed in the frontend, use it
       finalDescription = description.trim();
     } else if (callerId.toString() === targetUserId.toString()) {
-      // 2. If the user is depositing into their own account
       finalDescription = "Self-Initiated Savings Deposit";
     } else if (callerRole === "ADMIN" || callerRole === "SUPER_ADMIN") {
-      // 3. If an Admin is doing it for a member without typing a custom description
       finalDescription = "Deposit Logged by Admin";
     }
 
@@ -150,7 +145,6 @@ router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
         .status(404)
         .json({ message: "Account not found for this user." });
 
-    // 🚀 NEW: Dynamically calculate the real-time "Current Monthly Savings" from the Ledger
     const currentMonthString = getCurrentMonthString();
     const monthlyDeposits = await Transaction.find({
       cooperatorId: req.params.cooperatorId,
@@ -163,7 +157,6 @@ router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
       0,
     );
 
-    // Send back the account data along with the dynamically calculated real-time savings
     res.status(200).json({
       ...account.toObject(),
       currentMonthSavings,
@@ -267,14 +260,13 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       });
     }
 
-    // 🚀 SCALABILITY FIX: Immediately respond to the client to prevent HTTP timeouts
     res.status(202).json({
       message:
         "Monthly Reconciliation engine initiated. You will be notified upon completion.",
     });
 
-    // 🚀 SCALABILITY FIX: Execute the heavy batch processing in the background
     (async () => {
+      const session = await mongoose.startSession();
       try {
         const currentMonth = getCurrentMonthString();
         const BATCH_SIZE = 500;
@@ -333,11 +325,18 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
           accountsProcessed++;
 
           if (accountBulkOps.length >= BATCH_SIZE) {
-            await Promise.all([
-              Account.bulkWrite(accountBulkOps),
-              Transaction.insertMany(savingsTransactions),
-              Notification.insertMany(savingsNotifications),
-            ]);
+            session.startTransaction();
+            try {
+              await Promise.all([
+                Account.bulkWrite(accountBulkOps, { session }),
+                Transaction.insertMany(savingsTransactions, { session }),
+                Notification.insertMany(savingsNotifications, { session }),
+              ]);
+              await session.commitTransaction();
+            } catch (batchError) {
+              await session.abortTransaction();
+              console.error("Batch savings transaction failed...", batchError);
+            }
 
             if (io && onlineUsers) {
               savingsNotifications.forEach((notif) => {
@@ -354,11 +353,18 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         }
 
         if (accountBulkOps.length > 0) {
-          await Promise.all([
-            Account.bulkWrite(accountBulkOps),
-            Transaction.insertMany(savingsTransactions),
-            Notification.insertMany(savingsNotifications),
-          ]);
+          session.startTransaction();
+          try {
+            await Promise.all([
+              Account.bulkWrite(accountBulkOps, { session }),
+              Transaction.insertMany(savingsTransactions, { session }),
+              Notification.insertMany(savingsNotifications, { session }),
+            ]);
+            await session.commitTransaction();
+          } catch (batchError) {
+            await session.abortTransaction();
+            console.error("Trailing savings transaction failed...", batchError);
+          }
 
           if (io && onlineUsers) {
             savingsNotifications.forEach((notif) => {
@@ -390,7 +396,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
           }
 
           const targetRepayment = loan.amountDue || loan.amountRequested;
-          // 🚀 THE FIX: Calculate automated monthly deduction using the actual tenure
           const loanTenure = loan.tenure || 10;
           const monthlyInstallment = Math.round(targetRepayment / loanTenure);
 
@@ -434,11 +439,18 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
           });
 
           if (loanBulkOps.length >= BATCH_SIZE) {
-            await Promise.all([
-              Loan.bulkWrite(loanBulkOps),
-              Transaction.insertMany(loanTransactions),
-              Notification.insertMany(loanNotifications),
-            ]);
+            session.startTransaction();
+            try {
+              await Promise.all([
+                Loan.bulkWrite(loanBulkOps, { session }),
+                Transaction.insertMany(loanTransactions, { session }),
+                Notification.insertMany(loanNotifications, { session }),
+              ]);
+              await session.commitTransaction();
+            } catch (batchError) {
+              await session.abortTransaction();
+              console.error("Batch loan transaction failed...", batchError);
+            }
 
             if (io && onlineUsers) {
               loanNotifications.forEach((notif) => {
@@ -455,11 +467,18 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         }
 
         if (loanBulkOps.length > 0) {
-          await Promise.all([
-            Loan.bulkWrite(loanBulkOps),
-            Transaction.insertMany(loanTransactions),
-            Notification.insertMany(loanNotifications),
-          ]);
+          session.startTransaction();
+          try {
+            await Promise.all([
+              Loan.bulkWrite(loanBulkOps, { session }),
+              Transaction.insertMany(loanTransactions, { session }),
+              Notification.insertMany(loanNotifications, { session }),
+            ]);
+            await session.commitTransaction();
+          } catch (batchError) {
+            await session.abortTransaction();
+            console.error("Trailing loan transaction failed...", batchError);
+          }
 
           if (io && onlineUsers) {
             loanNotifications.forEach((notif) => {
@@ -470,7 +489,6 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
           }
         }
 
-        // 🚀 Notify the Admin when the background job finishes
         const adminId = req.user.id || req.user._id;
         await Notification.create({
           user: adminId,
@@ -485,6 +503,8 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
         }
       } catch (backgroundError) {
         console.error("Reconciliation Background Error:", backgroundError);
+      } finally {
+        session.endSession();
       }
     })();
   } catch (error) {
@@ -503,7 +523,6 @@ router.put(
   admin,
   async (req, res, next) => {
     try {
-      // 🚀 FIX: Extract dateJoined from the request body
       const { status, customMonthlySavings, dateJoined } = req.body;
 
       const account = await Account.findOne({
@@ -528,7 +547,6 @@ router.put(
 
       await account.save();
 
-      // 🚀 FIX: Find the actual Cooperator document and update the dateJoined
       if (dateJoined) {
         const user = await Cooperator.findById(req.params.cooperatorId);
         if (user) {
@@ -550,7 +568,6 @@ router.put(
         account,
       });
     } catch (error) {
-      // Passes errors to the global handler we set up earlier
       next(error);
     }
   },
