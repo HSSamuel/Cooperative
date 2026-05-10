@@ -23,7 +23,8 @@
     "mailersend": "^2.8.0",
     "mongoose": "^9.6.1",
     "multer": "^2.1.1",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

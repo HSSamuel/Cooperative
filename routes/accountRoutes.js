@@ -232,206 +232,233 @@ router.post("/run-reconciliation", protect, admin, async (req, res) => {
       });
     }
 
-    const currentMonth = getCurrentMonthString();
-    const BATCH_SIZE = 500;
-
-    let accountsProcessed = 0;
-    let loansProcessedCount = 0;
-
-    const io = req.app.get("io");
-    const onlineUsers = req.app.get("onlineUsers");
-
-    let accountBulkOps = [];
-    let savingsTransactions = [];
-    let savingsNotifications = [];
-
-    const accountCursor = Account.find({ status: "ACTIVE" }).cursor();
-
-    for (
-      let account = await accountCursor.next();
-      account != null;
-      account = await accountCursor.next()
-    ) {
-      const amountToSave =
-        account.customMonthlySavings > 0
-          ? account.customMonthlySavings
-          : standardSavingsKobo;
-
-      const newTotalSavings = account.totalSavings + amountToSave;
-      const newCreditLimit = newTotalSavings * 2;
-
-      accountBulkOps.push({
-        updateOne: {
-          filter: { _id: account._id },
-          update: {
-            totalSavings: newTotalSavings,
-            availableCreditLimit: newCreditLimit,
-          },
-        },
-      });
-
-      savingsTransactions.push({
-        cooperatorId: account.cooperatorId,
-        type: "CREDIT",
-        amount: amountToSave,
-        description: `Automated Payroll Savings - ${currentMonth}`,
-        effectiveMonth: currentMonth,
-        balanceAfter: newTotalSavings,
-      });
-
-      savingsNotifications.push({
-        user: account.cooperatorId,
-        title: "Monthly Savings Deducted",
-        message: `Your monthly savings of ₦${(amountToSave / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })} has been successfully processed.`,
-        type: "financial",
-      });
-
-      accountsProcessed++;
-
-      if (accountBulkOps.length >= BATCH_SIZE) {
-        await Promise.all([
-          Account.bulkWrite(accountBulkOps),
-          Transaction.insertMany(savingsTransactions),
-          Notification.insertMany(savingsNotifications),
-        ]);
-
-        if (io && onlineUsers) {
-          savingsNotifications.forEach((notif) => {
-            const targetSocket = onlineUsers.get(notif.user.toString());
-            if (targetSocket) io.to(targetSocket).emit("update_notifications");
-          });
-        }
-
-        accountBulkOps = [];
-        savingsTransactions = [];
-        savingsNotifications = [];
-      }
-    }
-
-    if (accountBulkOps.length > 0) {
-      await Promise.all([
-        Account.bulkWrite(accountBulkOps),
-        Transaction.insertMany(savingsTransactions),
-        Notification.insertMany(savingsNotifications),
-      ]);
-
-      if (io && onlineUsers) {
-        savingsNotifications.forEach((notif) => {
-          const targetSocket = onlineUsers.get(notif.user.toString());
-          if (targetSocket) io.to(targetSocket).emit("update_notifications");
-        });
-      }
-    }
-
-    let loanBulkOps = [];
-    let loanTransactions = [];
-    let loanNotifications = [];
-
-    const loanCursor = Loan.find({ status: "APPROVED" })
-      .populate("cooperatorId")
-      .cursor();
-
-    for (
-      let loan = await loanCursor.next();
-      loan != null;
-      loan = await loanCursor.next()
-    ) {
-      const userAccount = await Account.findOne({
-        cooperatorId: loan.cooperatorId._id,
-      });
-      if (userAccount && userAccount.status !== "ACTIVE") {
-        continue;
-      }
-
-      const targetRepayment = loan.amountDue || loan.amountRequested;
-      // 🚀 THE FIX: Calculate automated monthly deduction using the actual tenure
-      const loanTenure = loan.tenure || 10;
-      const monthlyInstallment = Math.round(targetRepayment / loanTenure);
-
-      let newAmountRepaid = loan.amountRepaid + monthlyInstallment;
-      let newStatus = "APPROVED";
-      let isFullyRepaid = false;
-
-      if (newAmountRepaid >= targetRepayment) {
-        newAmountRepaid = targetRepayment;
-        newStatus = "REPAID";
-        isFullyRepaid = true;
-      }
-
-      loansProcessedCount++;
-      const remainingBalance = targetRepayment - newAmountRepaid;
-
-      loanBulkOps.push({
-        updateOne: {
-          filter: { _id: loan._id },
-          update: {
-            amountRepaid: newAmountRepaid,
-            status: newStatus,
-          },
-        },
-      });
-
-      loanTransactions.push({
-        cooperatorId: loan.cooperatorId._id,
-        type: "DEBIT",
-        amount: monthlyInstallment,
-        description: `Automated Deduction: ${loan.loanType || "Loan"} Repayment. Remaining Balance: ₦${(remainingBalance / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`,
-        effectiveMonth: currentMonth,
-        balanceAfter: userAccount ? userAccount.totalSavings : 0,
-      });
-
-      loanNotifications.push({
-        user: loan.cooperatorId._id,
-        title: "Loan Installment Processed",
-        message: `Your monthly loan deduction of ₦${(monthlyInstallment / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })} was processed.${isFullyRepaid ? " Your loan is now fully repaid!" : ""}`,
-        type: "financial",
-      });
-
-      if (loanBulkOps.length >= BATCH_SIZE) {
-        await Promise.all([
-          Loan.bulkWrite(loanBulkOps),
-          Transaction.insertMany(loanTransactions),
-          Notification.insertMany(loanNotifications),
-        ]);
-
-        if (io && onlineUsers) {
-          loanNotifications.forEach((notif) => {
-            const targetSocket = onlineUsers.get(notif.user.toString());
-            if (targetSocket) io.to(targetSocket).emit("update_notifications");
-          });
-        }
-
-        loanBulkOps = [];
-        loanTransactions = [];
-        loanNotifications = [];
-      }
-    }
-
-    if (loanBulkOps.length > 0) {
-      await Promise.all([
-        Loan.bulkWrite(loanBulkOps),
-        Transaction.insertMany(loanTransactions),
-        Notification.insertMany(loanNotifications),
-      ]);
-
-      if (io && onlineUsers) {
-        loanNotifications.forEach((notif) => {
-          const targetSocket = onlineUsers.get(notif.user.toString());
-          if (targetSocket) io.to(targetSocket).emit("update_notifications");
-        });
-      }
-    }
-
-    res.status(200).json({
-      message: "Monthly Reconciliation Complete!",
-      stats: {
-        savingsAccountsUpdated: accountsProcessed,
-        loansProcessed: loansProcessedCount,
-      },
+    // 🚀 SCALABILITY FIX: Immediately respond to the client to prevent HTTP timeouts
+    res.status(202).json({
+      message:
+        "Monthly Reconciliation engine initiated. You will be notified upon completion.",
     });
+
+    // 🚀 SCALABILITY FIX: Execute the heavy batch processing in the background
+    (async () => {
+      try {
+        const currentMonth = getCurrentMonthString();
+        const BATCH_SIZE = 500;
+
+        let accountsProcessed = 0;
+        let loansProcessedCount = 0;
+
+        const io = req.app.get("io");
+        const onlineUsers = req.app.get("onlineUsers");
+
+        let accountBulkOps = [];
+        let savingsTransactions = [];
+        let savingsNotifications = [];
+
+        const accountCursor = Account.find({ status: "ACTIVE" }).cursor();
+
+        for (
+          let account = await accountCursor.next();
+          account != null;
+          account = await accountCursor.next()
+        ) {
+          const amountToSave =
+            account.customMonthlySavings > 0
+              ? account.customMonthlySavings
+              : standardSavingsKobo;
+
+          const newTotalSavings = account.totalSavings + amountToSave;
+          const newCreditLimit = newTotalSavings * 2;
+
+          accountBulkOps.push({
+            updateOne: {
+              filter: { _id: account._id },
+              update: {
+                totalSavings: newTotalSavings,
+                availableCreditLimit: newCreditLimit,
+              },
+            },
+          });
+
+          savingsTransactions.push({
+            cooperatorId: account.cooperatorId,
+            type: "CREDIT",
+            amount: amountToSave,
+            description: `Automated Payroll Savings - ${currentMonth}`,
+            effectiveMonth: currentMonth,
+            balanceAfter: newTotalSavings,
+          });
+
+          savingsNotifications.push({
+            user: account.cooperatorId,
+            title: "Monthly Savings Deducted",
+            message: `Your monthly savings of ₦${(amountToSave / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })} has been successfully processed.`,
+            type: "financial",
+          });
+
+          accountsProcessed++;
+
+          if (accountBulkOps.length >= BATCH_SIZE) {
+            await Promise.all([
+              Account.bulkWrite(accountBulkOps),
+              Transaction.insertMany(savingsTransactions),
+              Notification.insertMany(savingsNotifications),
+            ]);
+
+            if (io && onlineUsers) {
+              savingsNotifications.forEach((notif) => {
+                const targetSocket = onlineUsers.get(notif.user.toString());
+                if (targetSocket)
+                  io.to(targetSocket).emit("update_notifications");
+              });
+            }
+
+            accountBulkOps = [];
+            savingsTransactions = [];
+            savingsNotifications = [];
+          }
+        }
+
+        if (accountBulkOps.length > 0) {
+          await Promise.all([
+            Account.bulkWrite(accountBulkOps),
+            Transaction.insertMany(savingsTransactions),
+            Notification.insertMany(savingsNotifications),
+          ]);
+
+          if (io && onlineUsers) {
+            savingsNotifications.forEach((notif) => {
+              const targetSocket = onlineUsers.get(notif.user.toString());
+              if (targetSocket)
+                io.to(targetSocket).emit("update_notifications");
+            });
+          }
+        }
+
+        let loanBulkOps = [];
+        let loanTransactions = [];
+        let loanNotifications = [];
+
+        const loanCursor = Loan.find({ status: "APPROVED" })
+          .populate("cooperatorId")
+          .cursor();
+
+        for (
+          let loan = await loanCursor.next();
+          loan != null;
+          loan = await loanCursor.next()
+        ) {
+          const userAccount = await Account.findOne({
+            cooperatorId: loan.cooperatorId._id,
+          });
+          if (userAccount && userAccount.status !== "ACTIVE") {
+            continue;
+          }
+
+          const targetRepayment = loan.amountDue || loan.amountRequested;
+          // 🚀 THE FIX: Calculate automated monthly deduction using the actual tenure
+          const loanTenure = loan.tenure || 10;
+          const monthlyInstallment = Math.round(targetRepayment / loanTenure);
+
+          let newAmountRepaid = loan.amountRepaid + monthlyInstallment;
+          let newStatus = "APPROVED";
+          let isFullyRepaid = false;
+
+          if (newAmountRepaid >= targetRepayment) {
+            newAmountRepaid = targetRepayment;
+            newStatus = "REPAID";
+            isFullyRepaid = true;
+          }
+
+          loansProcessedCount++;
+          const remainingBalance = targetRepayment - newAmountRepaid;
+
+          loanBulkOps.push({
+            updateOne: {
+              filter: { _id: loan._id },
+              update: {
+                amountRepaid: newAmountRepaid,
+                status: newStatus,
+              },
+            },
+          });
+
+          loanTransactions.push({
+            cooperatorId: loan.cooperatorId._id,
+            type: "DEBIT",
+            amount: monthlyInstallment,
+            description: `Automated Deduction: ${loan.loanType || "Loan"} Repayment. Remaining Balance: ₦${(remainingBalance / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`,
+            effectiveMonth: currentMonth,
+            balanceAfter: userAccount ? userAccount.totalSavings : 0,
+          });
+
+          loanNotifications.push({
+            user: loan.cooperatorId._id,
+            title: "Loan Installment Processed",
+            message: `Your monthly loan deduction of ₦${(monthlyInstallment / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })} was processed.${isFullyRepaid ? " Your loan is now fully repaid!" : ""}`,
+            type: "financial",
+          });
+
+          if (loanBulkOps.length >= BATCH_SIZE) {
+            await Promise.all([
+              Loan.bulkWrite(loanBulkOps),
+              Transaction.insertMany(loanTransactions),
+              Notification.insertMany(loanNotifications),
+            ]);
+
+            if (io && onlineUsers) {
+              loanNotifications.forEach((notif) => {
+                const targetSocket = onlineUsers.get(notif.user.toString());
+                if (targetSocket)
+                  io.to(targetSocket).emit("update_notifications");
+              });
+            }
+
+            loanBulkOps = [];
+            loanTransactions = [];
+            loanNotifications = [];
+          }
+        }
+
+        if (loanBulkOps.length > 0) {
+          await Promise.all([
+            Loan.bulkWrite(loanBulkOps),
+            Transaction.insertMany(loanTransactions),
+            Notification.insertMany(loanNotifications),
+          ]);
+
+          if (io && onlineUsers) {
+            loanNotifications.forEach((notif) => {
+              const targetSocket = onlineUsers.get(notif.user.toString());
+              if (targetSocket)
+                io.to(targetSocket).emit("update_notifications");
+            });
+          }
+        }
+
+        // 🚀 Notify the Admin when the background job finishes
+        const adminId = req.user.id || req.user._id;
+        await Notification.create({
+          user: adminId,
+          title: "Reconciliation Complete",
+          message: `Monthly reconciliation successfully processed ${accountsProcessed} savings accounts and ${loansProcessedCount} active loans.`,
+          type: "system",
+        });
+
+        if (io && onlineUsers) {
+          const targetSocket = onlineUsers.get(adminId.toString());
+          if (targetSocket) io.to(targetSocket).emit("update_notifications");
+        }
+      } catch (backgroundError) {
+        console.error("Reconciliation Background Error:", backgroundError);
+      }
+    })();
   } catch (error) {
-    console.error("Reconciliation Error:", error);
-    res.status(500).json({ message: "Server error during reconciliation." });
+    console.error("Reconciliation Init Error:", error);
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .json({ message: "Server error initiating reconciliation." });
+    }
   }
 });
 
