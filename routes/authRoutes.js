@@ -69,21 +69,16 @@ router.post("/register", async (req, res) => {
 router.post("/login", async (req, res) => {
   try {
     const { fileNumber, password } = req.body;
-
-    // 🚀 FIX: Normalize the file number before searching the database
     const normalizedFileNumber = fileNumber.replace(/\s+/g, "").toUpperCase();
 
-    const user = await Cooperator.findOne({ fileNumber: normalizedFileNumber }).select("+password");
-    if (!user)
-      return res.status(400).json({
-        message: "Invalid credentials. Please check your ASCON File Number.",
-      });
+    const user = await Cooperator.findOne({
+      fileNumber: normalizedFileNumber,
+    }).select("+password");
+    if (!user) return res.status(400).json({ message: "Invalid credentials." });
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch)
-      return res
-        .status(400)
-        .json({ message: "Invalid credentials. Incorrect password." });
+      return res.status(400).json({ message: "Invalid credentials." });
 
     const payload = {
       id: user._id,
@@ -91,41 +86,45 @@ router.post("/login", async (req, res) => {
       fileNumber: user.fileNumber,
     };
 
-    const token = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: "1d",
+    // Generate Short-Lived Access Token (15 mins) & Long-Lived Refresh Token (7 Days)
+    const accessToken = jwt.sign(payload, process.env.JWT_SECRET, {
+      expiresIn: "15m",
+    });
+    const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
+      expiresIn: "7d",
     });
 
-    // Determine if the app is running in production
     const isProduction = process.env.NODE_ENV === "production";
 
-    res.cookie("coop_token", token, {
+    // Set Access Cookie
+    res.cookie("coop_token", accessToken, {
       httpOnly: true,
-      secure: isProduction, 
-      sameSite: isProduction ? "none" : "lax", 
-      maxAge: 24 * 60 * 60 * 1000, // 1 day
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
+      maxAge: 15 * 60 * 1000, // 15 Minutes
+    });
+
+    // Set Refresh Cookie
+    res.cookie("coop_refresh_token", refreshToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 Days
     });
 
     res.status(200).json({
       message: "Login successful",
-      token: token,
+      token: accessToken, // Still returning for frontend edge-interception if needed
       user: {
         id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
-        otherName: user.otherName,
         email: user.email,
         role: user.role,
-        avatarUrl: user.avatarUrl,
         fileNumber: user.fileNumber,
-        gender: user.gender,
-        birthday: user.birthday,
-        mobile: user.mobile,
-        occupation: user.occupation,
-        dateJoined: user.dateJoined || user.createdAt,
       },
     });
   } catch (error) {
-    console.error("Login Error:", error);
     res.status(500).json({ message: "Server error during login" });
   }
 });
@@ -372,6 +371,45 @@ router.get("/audit-logs", protect, async (req, res) => {
   } catch (error) {
     console.error("Audit Log Fetch Error:", error);
     res.status(500).json({ message: "Server error fetching audit logs." });
+  }
+});
+
+router.post("/refresh", async (req, res) => {
+  try {
+    const refreshToken = req.cookies.coop_refresh_token;
+
+    if (!refreshToken) {
+      return res
+        .status(401)
+        .json({ message: "Session expired. Please log in again." });
+    }
+
+    // Verify the Refresh Token
+    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+
+    // Issue a new Access Token
+    const payload = {
+      id: decoded.id,
+      role: decoded.role,
+      fileNumber: decoded.fileNumber,
+    };
+    const newAccessToken = jwt.sign(payload, process.env.JWT_SECRET, {
+      expiresIn: "15m",
+    });
+
+    const isProduction = process.env.NODE_ENV === "production";
+
+    res.cookie("coop_token", newAccessToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
+      maxAge: 15 * 60 * 1000,
+    });
+
+    res.status(200).json({ token: newAccessToken });
+  } catch (error) {
+    console.error("Token refresh failed:", error.message);
+    res.status(401).json({ message: "Invalid refresh token. Please log in." });
   }
 });
 
