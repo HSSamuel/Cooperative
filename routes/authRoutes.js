@@ -136,9 +136,16 @@ router.post("/login", validate(loginSchema), async (req, res) => {
         id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
+        otherName: user.otherName || "", // 🚀 FIX: Injecting otherName
         email: user.email,
         role: user.role,
         fileNumber: user.fileNumber,
+        avatarUrl: user.avatarUrl || "", // 🚀 Injecting all other missing fields
+        gender: user.gender || "",
+        birthday: user.birthday || null,
+        mobile: user.mobile || "",
+        occupation: user.occupation || "",
+        dateJoined: user.dateJoined,
       },
     });
   } catch (error) {
