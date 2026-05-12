@@ -17,6 +17,16 @@ const accountSchema = new mongoose.Schema(
         message: "totalSavings must be an integer (Kobo)",
       },
     },
+    // 🚀 Dedicated Dividend Tracker
+    totalDividends: {
+      type: Number,
+      required: true,
+      default: 0,
+      validate: {
+        validator: Number.isInteger,
+        message: "totalDividends must be an integer (Kobo)",
+      },
+    },
     availableCreditLimit: {
       type: Number,
       required: true,

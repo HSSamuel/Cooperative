@@ -210,6 +210,19 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
           message: "Cannot debit more than the available total savings.",
         });
       }
+    } else if (type === "DIVIDEND") {
+      // 🚀 NEW: Handle Individual Dividend Distribution
+      account = await Account.findOneAndUpdate(
+        { cooperatorId },
+        {
+          $inc: {
+            totalDividends: amountInKobo, // Track lifetime dividends
+            totalSavings: amountInKobo, // Add cash to main savings
+            availableCreditLimit: amountInKobo * 2, // Increase credit limit
+          },
+        },
+        { returnDocument: "after" },
+      );
     } else {
       return res.status(400).json({ message: "Invalid adjustment type." });
     }
@@ -217,19 +230,32 @@ router.post("/admin-adjust", protect, admin, async (req, res) => {
     if (!account)
       return res.status(404).json({ message: "Account not found." });
 
+    // 🚀 Update Transaction Description
     await Transaction.create({
       cooperatorId: cooperatorId,
-      type: type,
+      type: type === "DEBIT" ? "DEBIT" : "CREDIT",
       amount: amountInKobo,
-      description: `Manual Ledger Adjustment (${type})`,
+      description:
+        type === "DIVIDEND"
+          ? "Dividend Payout"
+          : `Manual Ledger Adjustment (${type})`,
       effectiveMonth: getCurrentMonthString(),
       balanceAfter: account.totalSavings,
     });
 
+    // 🚀 Update Notification Message
+    let notifTitle = "Admin Account Adjustment";
+    let notifMessage = `Your account was manually ${type === "CREDIT" ? "credited" : "debited"} by ₦${(amountInKobo / 100).toLocaleString()}.`;
+
+    if (type === "DIVIDEND") {
+      notifTitle = "Dividend Received";
+      notifMessage = `Your account was credited with a cooperative dividend of ₦${(amountInKobo / 100).toLocaleString()}.`;
+    }
+
     await Notification.create({
       user: cooperatorId,
-      title: "Admin Account Adjustment",
-      message: `Your account was manually ${type === "CREDIT" ? "credited" : "debited"} by ₦${(amountInKobo / 100).toLocaleString()}.`,
+      title: notifTitle,
+      message: notifMessage,
       type: "financial",
     });
 
@@ -573,13 +599,29 @@ router.put(
   },
 );
 
+// Replace the existing /all-accounts route
 router.get("/all-accounts", protect, admin, async (req, res) => {
   try {
-    const accounts = await Account.find({}).populate(
-      "cooperatorId",
-      "firstName lastName fileNumber email",
-    );
-    res.status(200).json(accounts);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    const accounts = await Account.find({})
+      .populate("cooperatorId", "firstName lastName fileNumber email")
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Account.countDocuments();
+
+    res.status(200).json({
+      accounts,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error fetching accounts." });
   }
@@ -602,6 +644,117 @@ router.get("/global-stats", protect, admin, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: "Server error fetching global stats." });
+  }
+});
+
+// @route   POST /api/account/distribute-dividends
+// @desc    Distribute profit pool proportionally based on total savings
+// @access  Admin
+router.post("/distribute-dividends", protect, admin, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { totalPoolInKobo } = req.body;
+
+    if (!totalPoolInKobo || totalPoolInKobo <= 0) {
+      throw new Error("Must provide a valid dividend pool amount in Kobo.");
+    }
+
+    // 1. Fetch all ACTIVE accounts to calculate the global baseline
+    const activeAccounts = await Account.find({ status: "ACTIVE" }).session(session);
+    const globalSavingsBase = activeAccounts.reduce((sum, acc) => sum + acc.totalSavings, 0);
+
+    if (globalSavingsBase === 0) {
+      throw new Error("No active savings found to distribute against.");
+    }
+
+    const currentMonthString = getCurrentMonthString();
+    let bulkAccountOps = [];
+    let transactions = [];
+    let notifications = [];
+
+    // 2. Proportionally distribute dividends
+    for (const acc of activeAccounts) {
+      if (acc.totalSavings > 0) {
+        // Calculate proportional share
+        const ownershipPercentage = acc.totalSavings / globalSavingsBase;
+        const dividendShare = Math.floor(ownershipPercentage * totalPoolInKobo);
+
+        if (dividendShare > 0) {
+          const newTotalSavings = acc.totalSavings + dividendShare;
+          
+          bulkAccountOps.push({
+            updateOne: {
+              filter: { _id: acc._id },
+              update: {
+                totalSavings: newTotalSavings,
+                availableCreditLimit: newTotalSavings * 2,
+              },
+            },
+          });
+
+          transactions.push({
+            cooperatorId: acc.cooperatorId,
+            type: "CREDIT",
+            amount: dividendShare,
+            description: `Annual Cooperative Dividend Distribution`,
+            effectiveMonth: currentMonthString,
+            balanceAfter: newTotalSavings,
+          });
+
+          notifications.push({
+            user: acc.cooperatorId,
+            title: "Dividend Payout Received!",
+            message: `Your account was credited with ₦${(dividendShare / 100).toLocaleString("en-NG", { minimumFractionDigits: 2 })} as your share of the cooperative profits.`,
+            type: "success",
+          });
+        }
+      }
+    }
+
+    // 3. Execute massive atomic write
+    if (bulkAccountOps.length > 0) {
+      await Account.bulkWrite(bulkAccountOps, { session });
+      await Transaction.insertMany(transactions, { session });
+      await Notification.insertMany(notifications, { session });
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // 4. Fire WebSockets
+    const io = req.app.get("io");
+    const onlineUsers = req.app.get("onlineUsers");
+    if (io && onlineUsers) {
+      notifications.forEach((notif) => {
+        const targetSocket = onlineUsers.get(notif.user.toString());
+        if (targetSocket) io.to(targetSocket).emit("update_notifications");
+      });
+    }
+
+    res.status(200).json({
+      message: `Successfully distributed ₦${(totalPoolInKobo / 100).toLocaleString()} across ${bulkAccountOps.length} active members.`,
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error("Dividend Error:", error);
+    res.status(500).json({ message: error.message || "Server error distributing dividends" });
+  }
+});
+
+// @route   GET /api/account/user/:cooperatorId/transactions
+// @desc    Admin fetches specific member's micro-ledger
+// @access  Admin
+router.get("/user/:cooperatorId/transactions", protect, admin, async (req, res) => {
+  try {
+    const transactions = await Transaction.find({ cooperatorId: req.params.cooperatorId })
+      .sort({ createdAt: -1 });
+    res.status(200).json(transactions);
+  } catch (error) {
+    console.error("Fetch Admin Ledger Error:", error);
+    res.status(500).json({ message: "Server error fetching member transactions." });
   }
 });
 

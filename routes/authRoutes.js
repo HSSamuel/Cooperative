@@ -8,6 +8,7 @@ import { sendPasswordResetEmail } from "../utils/emailService.js";
 import Cooperator from "../models/Cooperator.js";
 import Account from "../models/Account.js";
 import AuditLog from "../models/AuditLog.js";
+import SystemSetting from "../models/SystemSetting.js";
 import Notification from "../models/Notification.js";
 import { protect } from "../middleware/authMiddleware.js";
 
@@ -33,6 +34,14 @@ const loginSchema = z.object({
 
 router.post("/register", validate(registerSchema), async (req, res) => {
   try {
+    // 🚀 ENFORCE OPEN PORTAL REGISTRATION LIMITS
+    const settings = await SystemSetting.findOne();
+    if (settings && settings.allowRegistrations === false) {
+      return res.status(403).json({
+        message:
+          "Open registrations are currently disabled by Cooperative Administrators.",
+      });
+    }
     const { fileNumber, email, password, firstName, lastName, otherName } =
       req.body;
 
@@ -107,7 +116,7 @@ router.post("/login", validate(loginSchema), async (req, res) => {
     };
 
     const accessToken = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: "15m",
+      expiresIn: "1d", // 🚀 Increased from 15m to 1d (24 hours)
     });
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
       expiresIn: "7d",
@@ -119,7 +128,7 @@ router.post("/login", validate(loginSchema), async (req, res) => {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? "none" : "lax",
-      maxAge: 15 * 60 * 1000,
+      maxAge: 24 * 60 * 60 * 1000, // 🚀 Increased from 15 mins to 24 hours
     });
 
     res.cookie("coop_refresh_token", refreshToken, {
@@ -165,12 +174,30 @@ router.post("/logout", (req, res) => {
   res.status(200).json({ message: "Logged out successfully" });
 });
 
+// Replace the existing /all-members route
 router.get("/all-members", async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
+
     const users = await Cooperator.find()
       .select("-password")
-      .sort({ createdAt: -1 });
-    res.status(200).json(users);
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Cooperator.countDocuments();
+
+    res.status(200).json({
+      users,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
   } catch (error) {
     console.error("Fetch Users Error:", error);
     res.status(500).json({ message: "Server error fetching members" });
@@ -415,7 +442,7 @@ router.post("/refresh", async (req, res) => {
       fileNumber: decoded.fileNumber,
     };
     const newAccessToken = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: "15m",
+      expiresIn: "1d", // 🚀 Increased from 15m to 1d
     });
 
     const isProduction = process.env.NODE_ENV === "production";
@@ -424,7 +451,7 @@ router.post("/refresh", async (req, res) => {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? "none" : "lax",
-      maxAge: 15 * 60 * 1000,
+      maxAge: 24 * 60 * 60 * 1000, // 🚀 Increased from 15 mins to 24 hours
     });
 
     res.status(200).json({ token: newAccessToken });
