@@ -146,16 +146,17 @@ router.get("/user/:cooperatorId", protect, admin, async (req, res) => {
         .json({ message: "Account not found for this user." });
 
     const currentMonthString = getCurrentMonthString();
+
     const monthlyDeposits = await Transaction.find({
       cooperatorId: req.params.cooperatorId,
       type: "CREDIT",
       effectiveMonth: currentMonthString,
     });
 
-    const currentMonthSavings = monthlyDeposits.reduce(
-      (sum, txn) => sum + txn.amount,
-      0,
-    );
+    // 🚀 FIX: Strictly exclude dividends from the "Current Monthly Savings" metric
+    const currentMonthSavings = monthlyDeposits
+      .filter((txn) => !txn.description.toLowerCase().includes("dividend"))
+      .reduce((sum, txn) => sum + txn.amount, 0);
 
     res.status(200).json({
       ...account.toObject(),

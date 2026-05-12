@@ -10,6 +10,7 @@ import Account from "../models/Account.js";
 import AuditLog from "../models/AuditLog.js";
 import SystemSetting from "../models/SystemSetting.js";
 import Notification from "../models/Notification.js";
+import { v2 as cloudinary } from "cloudinary";
 import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
@@ -217,7 +218,40 @@ router.put("/profile", protect, async (req, res) => {
     if (req.body.lastName) user.lastName = req.body.lastName;
     if (req.body.otherName !== undefined) user.otherName = req.body.otherName;
     if (req.body.email) user.email = req.body.email;
-    if (req.body.avatarUrl) user.avatarUrl = req.body.avatarUrl;
+
+    // 🚀 FIX: Cloudinary Orphaned Image Cleanup
+    if (req.body.avatarUrl && req.body.avatarUrl !== user.avatarUrl) {
+      if (user.avatarUrl && user.avatarUrl.includes("cloudinary.com")) {
+        try {
+          // Extract the public_id from the Cloudinary URL (e.g., "ascon_coop_avatars/xyz123")
+          const match = user.avatarUrl.match(/\/upload\/(?:v\d+\/)?([^\.]+)/);
+
+          if (match && match[1]) {
+            const publicId = match[1];
+
+            cloudinary.config({
+              cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+              api_key: process.env.CLOUDINARY_API_KEY,
+              api_secret: process.env.CLOUDINARY_API_SECRET,
+            });
+
+            // Fire-and-forget the deletion to avoid blocking the user's profile update
+            cloudinary.uploader
+              .destroy(publicId)
+              .catch((err) =>
+                console.error("Non-fatal: Cloudinary destroy failed", err),
+              );
+          }
+        } catch (cleanupError) {
+          console.error(
+            "Non-fatal: Cloudinary URL parsing failed",
+            cleanupError,
+          );
+        }
+      }
+      // Assign the new avatar URL
+      user.avatarUrl = req.body.avatarUrl;
+    }
 
     if (req.body.gender !== undefined) user.gender = req.body.gender;
     if (req.body.birthday !== undefined) user.birthday = req.body.birthday;
