@@ -74,29 +74,64 @@ router.post(
       // Fetch user for name mapping
       const currentUser = await Cooperator.findById(userId).session(session);
 
-      // 🚀 ATOMIC LOCK: Fetch account within the transaction
-      const account = await Account.findOne({ cooperatorId: userId }).session(
-        session,
+      // 🚀 DYNAMIC FETCH: Get the current form fee from settings (fallback to 50000)
+      const settings = await SystemSetting.findOne().session(session);
+      const FORM_FEE_KOBO =
+        settings?.loanFormFee !== undefined ? settings.loanFormFee : 50000;
+
+      // 🚀 ATOMIC LOCK: Deduct the dynamic form fee directly during fetch
+      const account = await Account.findOneAndUpdate(
+        {
+          cooperatorId: userId,
+          totalSavings: { $gte: FORM_FEE_KOBO },
+        },
+        {
+          $inc: {
+            totalSavings: -FORM_FEE_KOBO,
+            availableCreditLimit: -(FORM_FEE_KOBO * 2),
+          },
+        },
+        { new: true, session },
       );
 
       if (!account) {
         throw new Error(
-          "Financial profile missing. Please contact Admin to sync your account.",
+          `Insufficient savings to cover the ₦${(FORM_FEE_KOBO / 100).toLocaleString()} loan application form fee, or financial profile missing.`,
         );
       }
+
+      // Log the form fee transaction
+      const currentMonthString = new Date().toLocaleString("en-GB", {
+        month: "long",
+        year: "numeric",
+      });
+
+      await Transaction.create(
+        [
+          {
+            cooperatorId: userId,
+            type: "DEBIT",
+            amount: FORM_FEE_KOBO,
+            description: `Loan Application Form Fee (${loanType})`,
+            effectiveMonth: currentMonthString,
+            balanceAfter: account.totalSavings,
+          },
+        ],
+        { session },
+      );
 
       // 🚀 ENFORCE 6-MONTH PROBATION RULE
       // (Currently commented out for testing purposes. Uncomment when ready for production.)
       /*
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    
-    const joinDate = currentUser.dateJoined || currentUser.createdAt;
-    
-    if (new Date(joinDate) > sixMonthsAgo) {
-      throw new Error("Probation Active: You must be a registered member for at least 6 months to unlock loan eligibility.");
-    }
-    */
+      const sixMonthsAgo = new Date();
+      sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+      
+      const joinDate = currentUser.dateJoined || currentUser.createdAt;
+      
+      if (new Date(joinDate) > sixMonthsAgo) {
+        throw new Error("Probation Active: You must be a registered member for at least 6 months to unlock loan eligibility.");
+      }
+      */
 
       if (amountInKobo > account.availableCreditLimit) {
         throw new Error(
@@ -132,17 +167,54 @@ router.post(
         throw new Error("You cannot guarantee your own loan.");
       }
 
+      // 🚀 Risk exposure calculation for Guarantor 1
+      const g1Account = await Account.findOne({ cooperatorId: g1._id }).session(
+        session,
+      );
+      const g1ActiveLoans = await Loan.find({
+        $or: [
+          { "guarantor1.cooperatorId": g1._id },
+          { "guarantor2.cooperatorId": g1._id },
+        ],
+        status: { $in: ["PENDING_GUARANTORS", "PENDING_ADMIN", "APPROVED"] },
+      }).session(session);
+
+      const g1Exposure = g1ActiveLoans.reduce(
+        (sum, l) => sum + (l.amountDue || l.amountRequested),
+        0,
+      );
+      if (g1Exposure + amountInKobo > (g1Account?.totalSavings || 0)) {
+        throw new Error(
+          `Guarantor 1 (${g1.fileNumber}) does not have enough unencumbered savings to guarantee this amount.`,
+        );
+      }
+
+      // 🚀 Risk exposure calculation for Guarantor 2
+      const g2Account = await Account.findOne({ cooperatorId: g2._id }).session(
+        session,
+      );
+      const g2ActiveLoans = await Loan.find({
+        $or: [
+          { "guarantor1.cooperatorId": g2._id },
+          { "guarantor2.cooperatorId": g2._id },
+        ],
+        status: { $in: ["PENDING_GUARANTORS", "PENDING_ADMIN", "APPROVED"] },
+      }).session(session);
+
+      const g2Exposure = g2ActiveLoans.reduce(
+        (sum, l) => sum + (l.amountDue || l.amountRequested),
+        0,
+      );
+      if (g2Exposure + amountInKobo > (g2Account?.totalSavings || 0)) {
+        throw new Error(
+          `Guarantor 2 (${g2.fileNumber}) does not have enough unencumbered savings to guarantee this amount.`,
+        );
+      }
+
       // Fetch Dynamic Interest Rate
       let currentInterestRate = 10;
-      try {
-        const settings = await SystemSetting.findOne().session(session);
-        if (settings && settings.interestRate !== undefined) {
-          currentInterestRate = settings.interestRate;
-        }
-      } catch (err) {
-        console.error(
-          "Could not fetch SystemSettings, using default interest rate.",
-        );
+      if (settings && settings.interestRate !== undefined) {
+        currentInterestRate = settings.interestRate;
       }
 
       const totalInterestRate = currentInterestRate * (tenure / 10);
@@ -192,7 +264,7 @@ router.post(
         {
           user: userId,
           title: "Loan Application Submitted",
-          message: `Your ${loanType} loan request for ₦${(amountInKobo / 100).toLocaleString()} has been sent to your guarantors.`,
+          message: `Your ${loanType} loan request for ₦${(amountInKobo / 100).toLocaleString()} was sent to your guarantors. A form fee of ₦${(FORM_FEE_KOBO / 100).toLocaleString()} was deducted.`,
           type: "info",
         },
         {
@@ -238,11 +310,9 @@ router.post(
       await session.abortTransaction();
       session.endSession();
       console.error("Loan Request Error:", error);
-      res
-        .status(400)
-        .json({
-          message: error.message || "Server error processing loan request",
-        });
+      res.status(400).json({
+        message: error.message || "Server error processing loan request",
+      });
     }
   },
 );
@@ -544,12 +614,10 @@ router.put("/:id/guarantee", protect, async (req, res) => {
       if (targetSocket) io.to(targetSocket).emit("update_notifications");
     }
 
-    res
-      .status(200)
-      .json({
-        message: `Successfully ${action.toLowerCase()} the request.`,
-        loan,
-      });
+    res.status(200).json({
+      message: `Successfully ${action.toLowerCase()} the request.`,
+      loan,
+    });
   } catch (error) {
     console.error("Guarantor Action Error:", error);
     res.status(500).json({ message: "Server error processing guarantee" });
@@ -563,7 +631,7 @@ router.get("/payroll-report", protect, admin, async (req, res) => {
       "cooperatorId",
       "firstName lastName fileNumber",
     );
-    
+
     // 1. Generate a dynamic date for the report header
     const reportMonth = new Date().toLocaleString("en-GB", {
       month: "long",
@@ -574,23 +642,27 @@ router.get("/payroll-report", protect, admin, async (req, res) => {
     let csv = "ASCON STAFF MULTI-PURPOSE CO-OPERATIVE SOCIETY LIMITED\n";
     csv += `Official Monthly Payroll Deduction Report - ${reportMonth}\n`;
     csv += "Generated by ASCON Coop Automated System\n";
-    csv += "----------------------------------------------------------------------------------------\n\n";
+    csv +=
+      "----------------------------------------------------------------------------------------\n\n";
 
     // 3. The Updated Column Headings
-    csv += "Staff File Number,First Name,Last Name,Principal (NGN),Total Due with Interest (NGN),Amount Repaid So Far (NGN),Outstanding Balance to Deduct (NGN)\n";
+    csv +=
+      "Staff File Number,First Name,Last Name,Principal (NGN),Total Due with Interest (NGN),Amount Repaid So Far (NGN),Outstanding Balance to Deduct (NGN)\n";
 
     // 4. Inject the Data
     activeLoans.forEach((loan) => {
       if (!loan.cooperatorId) return;
       const targetRepayment = loan.amountDue || loan.amountRequested;
       const balance = targetRepayment - loan.amountRepaid;
-      
+
       csv += `"${loan.cooperatorId.fileNumber}","${loan.cooperatorId.firstName}","${loan.cooperatorId.lastName}","${loan.amountRequested / 100}","${targetRepayment / 100}","${loan.amountRepaid / 100}","${balance / 100}"\n`;
     });
 
     res.header("Content-Type", "text/csv");
     // Dynamically name the file based on the month
-    res.attachment(`ASCON_Payroll_Deductions_${reportMonth.replace(/\s+/g, '_')}.csv`);
+    res.attachment(
+      `ASCON_Payroll_Deductions_${reportMonth.replace(/\s+/g, "_")}.csv`,
+    );
     res.status(200).send(csv);
   } catch (error) {
     res.status(500).json({ message: "Server error generating payroll report" });

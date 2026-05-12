@@ -1,7 +1,10 @@
 import jwt from "jsonwebtoken";
-import SystemSetting from "../models/SystemSetting.js"; // 🚀 Added import
+import SystemSetting from "../models/SystemSetting.js";
 
-// 🚀 Changed to async to query DB for Maintenance Mode
+// 🚀 FIX: In-memory cache to prevent DB bombardment
+let cachedSettings = { data: null, lastFetch: 0 };
+const CACHE_TTL = 60 * 1000; // 60 seconds
+
 export const protect = async (req, res, next) => {
   let token;
 
@@ -14,32 +17,33 @@ export const protect = async (req, res, next) => {
     token = req.headers.authorization.split(" ")[1];
   }
 
-  if (!token) {
+  if (!token)
     return res
       .status(401)
       .json({ message: "Not authorized, no token provided" });
-  }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
 
-    // 🚀 SYSTEM LOCKOUT ENFORCEMENT: Block standard users if maintenance is ON
-    const settings = await SystemSetting.findOne();
+    // 🚀 FIX: Use cached settings instead of querying MongoDB every request
+    const now = Date.now();
+    if (!cachedSettings.data || now - cachedSettings.lastFetch > CACHE_TTL) {
+      cachedSettings.data = await SystemSetting.findOne();
+      cachedSettings.lastFetch = now;
+    }
+
     if (
-      settings &&
-      settings.maintenanceMode &&
+      cachedSettings.data?.maintenanceMode &&
       req.user.role === "COOPERATOR"
     ) {
-      return res.status(503).json({
-        message:
-          "System is currently under maintenance. Please try again later.",
-      });
+      return res
+        .status(503)
+        .json({ message: "System is currently under maintenance." });
     }
 
     next();
   } catch (error) {
-    console.error("Token verification failed:", error.message);
     return res.status(401).json({ message: "Not authorized, token failed" });
   }
 };

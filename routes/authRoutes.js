@@ -427,7 +427,6 @@ router.get("/audit-logs", protect, async (req, res) => {
 router.post("/refresh", async (req, res) => {
   try {
     const refreshToken = req.cookies.coop_refresh_token;
-
     if (!refreshToken) {
       return res
         .status(401)
@@ -436,10 +435,16 @@ router.post("/refresh", async (req, res) => {
 
     const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
 
+    // 🚀 FIX: Validate against the database to catch demotions/bans
+    const user = await Cooperator.findById(decoded.id);
+    if (!user) {
+      return res.status(401).json({ message: "Account no longer exists." });
+    }
+
     const payload = {
-      id: decoded.id,
-      role: decoded.role,
-      fileNumber: decoded.fileNumber,
+      id: user._id,
+      role: user.role, // Pull fresh role from DB
+      fileNumber: user.fileNumber,
     };
     const newAccessToken = jwt.sign(payload, process.env.JWT_SECRET, {
       expiresIn: "1d", // 🚀 Increased from 15m to 1d

@@ -599,7 +599,6 @@ router.put(
   },
 );
 
-// Replace the existing /all-accounts route
 router.get("/all-accounts", protect, admin, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -662,8 +661,13 @@ router.post("/distribute-dividends", protect, admin, async (req, res) => {
     }
 
     // 1. Fetch all ACTIVE accounts to calculate the global baseline
-    const activeAccounts = await Account.find({ status: "ACTIVE" }).session(session);
-    const globalSavingsBase = activeAccounts.reduce((sum, acc) => sum + acc.totalSavings, 0);
+    const activeAccounts = await Account.find({ status: "ACTIVE" }).session(
+      session,
+    );
+    const globalSavingsBase = activeAccounts.reduce(
+      (sum, acc) => sum + acc.totalSavings,
+      0,
+    );
 
     if (globalSavingsBase === 0) {
       throw new Error("No active savings found to distribute against.");
@@ -674,6 +678,9 @@ router.post("/distribute-dividends", protect, admin, async (req, res) => {
     let transactions = [];
     let notifications = [];
 
+    // 🚀 FIX: Track exactly how much has been mathematically distributed
+    let totalDistributed = 0;
+
     // 2. Proportionally distribute dividends
     for (const acc of activeAccounts) {
       if (acc.totalSavings > 0) {
@@ -682,8 +689,9 @@ router.post("/distribute-dividends", protect, admin, async (req, res) => {
         const dividendShare = Math.floor(ownershipPercentage * totalPoolInKobo);
 
         if (dividendShare > 0) {
+          totalDistributed += dividendShare;
           const newTotalSavings = acc.totalSavings + dividendShare;
-          
+
           bulkAccountOps.push({
             updateOne: {
               filter: { _id: acc._id },
@@ -710,6 +718,26 @@ router.post("/distribute-dividends", protect, admin, async (req, res) => {
             type: "success",
           });
         }
+      }
+    }
+
+    // 🚀 FIX: Assign the fractional kobo remainder to the highest saver to perfectly balance the ledger
+    const remainder = totalPoolInKobo - totalDistributed;
+    if (remainder > 0 && activeAccounts.length > 0) {
+      const topAccount = activeAccounts.reduce((prev, current) =>
+        prev.totalSavings > current.totalSavings ? prev : current,
+      );
+      const opIndex = bulkAccountOps.findIndex(
+        (op) =>
+          op.updateOne.filter._id.toString() === topAccount._id.toString(),
+      );
+
+      if (opIndex !== -1) {
+        bulkAccountOps[opIndex].updateOne.update.totalSavings += remainder;
+        bulkAccountOps[opIndex].updateOne.update.availableCreditLimit +=
+          remainder * 2;
+        transactions[opIndex].amount += remainder;
+        transactions[opIndex].balanceAfter += remainder;
       }
     }
 
@@ -740,22 +768,34 @@ router.post("/distribute-dividends", protect, admin, async (req, res) => {
     await session.abortTransaction();
     session.endSession();
     console.error("Dividend Error:", error);
-    res.status(500).json({ message: error.message || "Server error distributing dividends" });
+    res
+      .status(500)
+      .json({
+        message: error.message || "Server error distributing dividends",
+      });
   }
 });
 
 // @route   GET /api/account/user/:cooperatorId/transactions
 // @desc    Admin fetches specific member's micro-ledger
 // @access  Admin
-router.get("/user/:cooperatorId/transactions", protect, admin, async (req, res) => {
-  try {
-    const transactions = await Transaction.find({ cooperatorId: req.params.cooperatorId })
-      .sort({ createdAt: -1 });
-    res.status(200).json(transactions);
-  } catch (error) {
-    console.error("Fetch Admin Ledger Error:", error);
-    res.status(500).json({ message: "Server error fetching member transactions." });
-  }
-});
+router.get(
+  "/user/:cooperatorId/transactions",
+  protect,
+  admin,
+  async (req, res) => {
+    try {
+      const transactions = await Transaction.find({
+        cooperatorId: req.params.cooperatorId,
+      }).sort({ createdAt: -1 });
+      res.status(200).json(transactions);
+    } catch (error) {
+      console.error("Fetch Admin Ledger Error:", error);
+      res
+        .status(500)
+        .json({ message: "Server error fetching member transactions." });
+    }
+  },
+);
 
 export default router;

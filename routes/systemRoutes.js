@@ -29,6 +29,7 @@ router.put("/settings", protect, admin, async (req, res) => {
       req.body.maintenanceMode ?? settings.maintenanceMode;
     settings.allowRegistrations =
       req.body.allowRegistrations ?? settings.allowRegistrations;
+    settings.loanFormFee = req.body.loanFormFee ?? settings.loanFormFee;
 
     await settings.save();
 
