@@ -32,7 +32,7 @@ const loanRequestSchema = z.object({
         .enum(["REGULAR", "EMERGENCY", "COMMODITY", "EQUIPMENT"])
         .optional()
         .default("REGULAR"),
-      tenure: z.number().int().min(1).max(36).optional().default(10),
+      tenure: z.number().int().min(1).optional().default(10),
     })
     .refine((data) => data.guarantor1FileNumber !== data.guarantor2FileNumber, {
       message: "You must provide two distinct guarantors.",

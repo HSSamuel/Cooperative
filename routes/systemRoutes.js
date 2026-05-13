@@ -22,27 +22,56 @@ router.put("/settings", protect, admin, async (req, res) => {
     let settings = await SystemSetting.findOne();
     if (!settings) settings = await SystemSetting.create({});
 
-    settings.interestRate = req.body.interestRate ?? settings.interestRate;
-    settings.creditMultiplier =
-      req.body.creditMultiplier ?? settings.creditMultiplier;
-    settings.maintenanceMode =
-      req.body.maintenanceMode ?? settings.maintenanceMode;
-    settings.allowRegistrations =
-      req.body.allowRegistrations ?? settings.allowRegistrations;
-    settings.loanFormFee = req.body.loanFormFee ?? settings.loanFormFee;
+    const changes = [];
 
-    await settings.save();
+    // Helper to detect, format, and push modifications to the changes array
+    const checkChange = (key, friendlyName, formatValue = (v) => v) => {
+      if (req.body[key] !== undefined) {
+        // Special comparison for arrays (e.g., loanTenures)
+        if (Array.isArray(settings[key])) {
+          const oldArr = settings[key].join(", ");
+          const newArr = req.body[key].join(", ");
+          if (oldArr !== newArr) {
+            changes.push(`${friendlyName} ([${oldArr}] -> [${newArr}])`);
+            settings[key] = req.body[key];
+          }
+        }
+        // Standard comparison for primitives
+        else if (req.body[key] !== settings[key]) {
+          changes.push(
+            `${friendlyName} (${formatValue(settings[key])} -> ${formatValue(req.body[key])})`,
+          );
+          settings[key] = req.body[key];
+        }
+      }
+    };
 
-    logAdminAction(
-      req.user.id || req.user._id,
-      "UPDATED_SETTINGS",
-      "Modified system global configurations.",
-    );
+    // Track all potential field changes
+    checkChange("interestRate", "Interest Rate", (v) => `${v}%`);
+    checkChange("creditMultiplier", "Credit Multiplier", (v) => `${v}x`);
+    checkChange("maintenanceMode", "Maintenance Mode");
+    checkChange("allowRegistrations", "Open Enrollment");
+    checkChange("loanFormFee", "Loan Form Fee", (v) => `₦${v / 100}`);
+    checkChange("loanTenures", "Loan Tenures");
+
+    // Only save and log if modifications actually occurred
+    if (changes.length > 0) {
+      await settings.save();
+
+      const detailedDescription = `Modified configurations: ${changes.join(", ")}.`;
+
+      logAdminAction(
+        req.user.id || req.user._id,
+        "UPDATED_SETTINGS",
+        detailedDescription,
+      );
+    }
 
     res
       .status(200)
       .json({ message: "Settings updated successfully", settings });
   } catch (error) {
+    console.error("Settings Update Error:", error);
     res.status(500).json({ message: "Server error updating settings" });
   }
 });

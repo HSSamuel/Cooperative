@@ -7,6 +7,12 @@ const notificationSchema = new mongoose.Schema(
       ref: "Cooperator",
       required: true,
     },
+    // NEW: Track the sender so we can reply to them
+    sender: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Cooperator",
+      required: false,
+    },
     title: {
       type: String,
       required: true,
