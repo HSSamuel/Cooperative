@@ -91,7 +91,8 @@ router.post(
             availableCreditLimit: -(FORM_FEE_KOBO * 2),
           },
         },
-        { new: true, session },
+        // 🚀 FIX: Replaced { new: true } with { returnDocument: "after" }
+        { returnDocument: "after", session },
       );
 
       if (!account) {
@@ -439,7 +440,8 @@ router.post("/:id/repay", protect, validate(repaySchema), async (req, res) => {
           availableCreditLimit: -(actualRepayment * 2),
         },
       },
-      { new: true, session },
+      // 🚀 FIX: Replaced { new: true } with { returnDocument: "after" }
+      { returnDocument: "after", session },
     );
 
     if (!account) {
