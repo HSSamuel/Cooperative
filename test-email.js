@@ -3,10 +3,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const runTest = async () => {
-  console.log("🚀 Initializing MailerSend Test Protocol...");
+  console.log("🚀 Initializing Nodemailer OAuth2 Test Protocol...");
 
   // You can put ANY email address here to receive the test emails
-  const myTestEmail = "hssamuel2024@gmail.com";
+  const myTestEmail = "smkmayomisamuel@gmail.com";
 
   try {
     const { sendGuarantorRequestEmail, sendLoanStatusEmail } =
@@ -29,7 +29,7 @@ const runTest = async () => {
     );
 
     console.log(
-      "✅ MailerSend API commands dispatched successfully! Check your inbox.",
+      "✅ Nodemailer OAuth2 API commands dispatched successfully! Check your inbox.",
     );
   } catch (error) {
     console.error("❌ Test Failed:", error);

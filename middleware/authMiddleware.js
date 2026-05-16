@@ -1,9 +1,14 @@
 import jwt from "jsonwebtoken";
 import SystemSetting from "../models/SystemSetting.js";
 
-// 🚀 FIX: In-memory cache to prevent DB bombardment
+// In-memory cache to prevent DB bombardment
 let cachedSettings = { data: null, lastFetch: 0 };
 const CACHE_TTL = 60 * 1000; // 60 seconds
+
+// 🚀 FIX #4: Export a function to instantly invalidate the cache when settings change
+export const clearSettingsCache = () => {
+  cachedSettings = { data: null, lastFetch: 0 };
+};
 
 export const protect = async (req, res, next) => {
   let token;
@@ -26,7 +31,6 @@ export const protect = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
 
-    // 🚀 FIX: Use cached settings instead of querying MongoDB every request
     const now = Date.now();
     if (!cachedSettings.data || now - cachedSettings.lastFetch > CACHE_TTL) {
       cachedSettings.data = await SystemSetting.findOne();

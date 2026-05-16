@@ -1,6 +1,10 @@
 import express from "express";
 import SystemSetting from "../models/SystemSetting.js";
-import { protect, admin } from "../middleware/authMiddleware.js";
+import {
+  protect,
+  admin,
+  clearSettingsCache,
+} from "../middleware/authMiddleware.js";
 import { logAdminAction } from "../utils/auditLogger.js";
 
 const router = express.Router();
@@ -57,6 +61,9 @@ router.put("/settings", protect, admin, async (req, res) => {
     // Only save and log if modifications actually occurred
     if (changes.length > 0) {
       await settings.save();
+
+      // 🚀 FIX: Instantly wipe the auth middleware cache so changes (like Maintenance Mode) apply instantly
+      clearSettingsCache();
 
       const detailedDescription = `Modified configurations: ${changes.join(", ")}.`;
 

@@ -1,15 +1,10 @@
-import { MailerSend, EmailParams, Sender, Recipient } from "mailersend";
+import nodemailer from "nodemailer";
+import { google } from "googleapis";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-// Initialize the MailerSend SDK
-const mailerSend = new MailerSend({
-  apiKey: process.env.MAILERSEND_API_KEY,
-});
-
-const senderEmail = process.env.EMAIL_FROM || "alerts@coop.asconalumni.org";
-const sentFrom = new Sender(senderEmail, "ASCON Cooperative");
+const OAuth2 = google.auth.OAuth2;
 
 // Helper to reliably grab the frontend URL
 const getFrontendUrl = () =>
@@ -17,30 +12,75 @@ const getFrontendUrl = () =>
   process.env.NEXT_PUBLIC_FRONTEND_URL ||
   "http://localhost:3000";
 
-// 1. Generic Send Function via MailerSend HTTP API (Bypasses Render Block)
-const sendEmail = async ({ to, subject, html }) => {
+// 1. Setup the OAuth2 Transporter
+const createTransporter = async () => {
   try {
-    const recipients = [new Recipient(to)];
-
-    const emailParams = new EmailParams()
-      .setFrom(sentFrom)
-      .setTo(recipients)
-      .setSubject(subject)
-      .setHtml(html);
-
-    await mailerSend.email.send(emailParams);
-    console.log(`✉️ MailerSend: Email securely dispatched to ${to}`);
-  } catch (error) {
-    // MailerSend attaches detailed error logs in the body
-    console.error(
-      `❌ MailerSend Error sending to ${to}:`,
-      error.body || error.message,
+    const oauth2Client = new OAuth2(
+      process.env.MAILER_CLIENT_ID,
+      process.env.MAILER_CLIENT_SECRET,
+      "https://developers.google.com/oauthplayground",
     );
+
+    oauth2Client.setCredentials({
+      refresh_token: process.env.MAILER_REFRESH_TOKEN,
+    });
+
+    // Generate a new access token dynamically
+    const accessToken = await new Promise((resolve, reject) => {
+      oauth2Client.getAccessToken((err, token) => {
+        if (err) {
+          console.error("❌ Failed to create access token:", err);
+          reject("Failed to create access token");
+        }
+        resolve(token);
+      });
+    });
+
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false, // MUST be false for port 587. It will upgrade to secure via STARTTLS
+  requireTLS: true,
+  auth: {
+    type: "OAuth2",
+    user: process.env.EMAIL_USER,
+    accessToken,
+    clientId: process.env.MAILER_CLIENT_ID,
+    clientSecret: process.env.MAILER_CLIENT_SECRET,
+    refreshToken: process.env.MAILER_REFRESH_TOKEN,
+  },
+});
+
+    return transporter;
+  } catch (error) {
+    console.error("❌ Error setting up Nodemailer OAuth2 Transporter:", error);
     throw error;
   }
 };
 
-// 2. Pre-built HTML Templates for our specific actions
+// 2. Generic Send Function via Nodemailer (Bypasses Render Block)
+const sendEmail = async ({ to, subject, html }) => {
+  try {
+    const emailTransporter = await createTransporter();
+
+    const mailOptions = {
+      from: `"ASCON Cooperative" <${process.env.EMAIL_USER}>`,
+      to,
+      subject,
+      html,
+    };
+
+    const info = await emailTransporter.sendMail(mailOptions);
+    console.log(
+      `✉️ Nodemailer: Email securely dispatched to ${to} [ID: ${info.messageId}]`,
+    );
+  } catch (error) {
+    console.error(`❌ Nodemailer Error sending to ${to}:`, error.message);
+    throw error;
+  }
+};
+
+// 3. Pre-built HTML Templates for our specific actions
 
 export const sendGuarantorRequestEmail = async (
   guarantorEmail,

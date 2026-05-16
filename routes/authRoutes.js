@@ -35,14 +35,23 @@ const loginSchema = z.object({
 
 router.post("/register", validate(registerSchema), async (req, res) => {
   try {
-    // 🚀 ENFORCE OPEN PORTAL REGISTRATION LIMITS
     const settings = await SystemSetting.findOne();
+
+    // 🚀 FIX: Prevent registration entirely during maintenance mode
+    if (settings?.maintenanceMode) {
+      return res.status(503).json({
+        message:
+          "System is currently under maintenance. Registration is temporarily paused.",
+      });
+    }
+
     if (settings && settings.allowRegistrations === false) {
       return res.status(403).json({
         message:
           "Open registrations are currently disabled by Cooperative Administrators.",
       });
     }
+
     const { fileNumber, email, password, firstName, lastName, otherName } =
       req.body;
 
@@ -110,6 +119,15 @@ router.post("/login", validate(loginSchema), async (req, res) => {
     if (!isMatch)
       return res.status(400).json({ message: "Invalid credentials." });
 
+    // 🚀 FIX: Prevent regular cooperators from logging in during maintenance
+    const settings = await SystemSetting.findOne();
+    if (settings?.maintenanceMode && user.role === "COOPERATOR") {
+      return res.status(503).json({
+        message:
+          "System is currently under maintenance. Please try again later.",
+      });
+    }
+
     const payload = {
       id: user._id,
       role: user.role,
@@ -117,7 +135,7 @@ router.post("/login", validate(loginSchema), async (req, res) => {
     };
 
     const accessToken = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: "1d", // 🚀 Increased from 15m to 1d (24 hours)
+      expiresIn: "1d",
     });
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
       expiresIn: "7d",
@@ -129,7 +147,7 @@ router.post("/login", validate(loginSchema), async (req, res) => {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? "none" : "lax",
-      maxAge: 24 * 60 * 60 * 1000, // 🚀 Increased from 15 mins to 24 hours
+      maxAge: 24 * 60 * 60 * 1000,
     });
 
     res.cookie("coop_refresh_token", refreshToken, {
@@ -146,11 +164,11 @@ router.post("/login", validate(loginSchema), async (req, res) => {
         id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
-        otherName: user.otherName || "", // 🚀 FIX: Injecting otherName
+        otherName: user.otherName || "",
         email: user.email,
         role: user.role,
         fileNumber: user.fileNumber,
-        avatarUrl: user.avatarUrl || "", // 🚀 Injecting all other missing fields
+        avatarUrl: user.avatarUrl || "",
         gender: user.gender || "",
         birthday: user.birthday || null,
         mobile: user.mobile || "",
@@ -172,10 +190,15 @@ router.post("/logout", (req, res) => {
     sameSite: isProduction ? "none" : "lax",
     expires: new Date(0),
   });
+  res.cookie("coop_refresh_token", "", {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+    expires: new Date(0),
+  });
   res.status(200).json({ message: "Logged out successfully" });
 });
 
-// Replace the existing /all-members route
 router.get("/all-members", async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -219,11 +242,9 @@ router.put("/profile", protect, async (req, res) => {
     if (req.body.otherName !== undefined) user.otherName = req.body.otherName;
     if (req.body.email) user.email = req.body.email;
 
-    // 🚀 FIX: Cloudinary Orphaned Image Cleanup
     if (req.body.avatarUrl && req.body.avatarUrl !== user.avatarUrl) {
       if (user.avatarUrl && user.avatarUrl.includes("cloudinary.com")) {
         try {
-          // Extract the public_id from the Cloudinary URL (e.g., "ascon_coop_avatars/xyz123")
           const match = user.avatarUrl.match(/\/upload\/(?:v\d+\/)?([^\.]+)/);
 
           if (match && match[1]) {
@@ -235,7 +256,6 @@ router.put("/profile", protect, async (req, res) => {
               api_secret: process.env.CLOUDINARY_API_SECRET,
             });
 
-            // Fire-and-forget the deletion to avoid blocking the user's profile update
             cloudinary.uploader
               .destroy(publicId)
               .catch((err) =>
@@ -249,7 +269,6 @@ router.put("/profile", protect, async (req, res) => {
           );
         }
       }
-      // Assign the new avatar URL
       user.avatarUrl = req.body.avatarUrl;
     }
 
@@ -376,13 +395,11 @@ router.post("/forgot-password", async (req, res) => {
 
     const resetUrl = `${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/reset-password/${resetToken}`;
 
-    // Fire-and-forget the email. Do not await it!
     sendPasswordResetEmail(user.email, user.firstName, resetUrl).catch(
       (emailError) =>
         console.error("Non-fatal: Password reset email failed.", emailError),
     );
 
-    // Immediately resolve the HTTP request
     res.status(200).json({
       message: "If that email is registered, a reset link has been sent.",
     });
@@ -469,7 +486,6 @@ router.post("/refresh", async (req, res) => {
 
     const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
 
-    // 🚀 FIX: Validate against the database to catch demotions/bans
     const user = await Cooperator.findById(decoded.id);
     if (!user) {
       return res.status(401).json({ message: "Account no longer exists." });
@@ -477,11 +493,15 @@ router.post("/refresh", async (req, res) => {
 
     const payload = {
       id: user._id,
-      role: user.role, // Pull fresh role from DB
+      role: user.role,
       fileNumber: user.fileNumber,
     };
+
     const newAccessToken = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: "1d", // 🚀 Increased from 15m to 1d
+      expiresIn: "1d",
+    });
+    const newRefreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
+      expiresIn: "7d",
     });
 
     const isProduction = process.env.NODE_ENV === "production";
@@ -490,7 +510,14 @@ router.post("/refresh", async (req, res) => {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? "none" : "lax",
-      maxAge: 24 * 60 * 60 * 1000, // 🚀 Increased from 15 mins to 24 hours
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+
+    res.cookie("coop_refresh_token", newRefreshToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
     res.status(200).json({ token: newAccessToken });
