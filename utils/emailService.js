@@ -1,4 +1,3 @@
-import nodemailer from "nodemailer";
 import { google } from "googleapis";
 import dotenv from "dotenv";
 
@@ -12,77 +11,59 @@ const getFrontendUrl = () =>
   process.env.NEXT_PUBLIC_FRONTEND_URL ||
   "http://localhost:3000";
 
-// 1. Setup the OAuth2 Transporter with extreme resilience
-const createTransporter = async () => {
-  try {
-    const oauth2Client = new OAuth2(
-      process.env.MAILER_CLIENT_ID,
-      process.env.MAILER_CLIENT_SECRET,
-      "https://developers.google.com/oauthplayground"
-    );
+// 1. Setup the Gmail API Client (Bypasses Render's SMTP Block via Port 443)
+const createGmailClient = () => {
+  const oauth2Client = new OAuth2(
+    process.env.MAILER_CLIENT_ID,
+    process.env.MAILER_CLIENT_SECRET,
+    "https://developers.google.com/oauthplayground",
+  );
 
-    oauth2Client.setCredentials({
-      refresh_token: process.env.MAILER_REFRESH_TOKEN,
-    });
+  oauth2Client.setCredentials({
+    refresh_token: process.env.MAILER_REFRESH_TOKEN,
+  });
 
-    const accessToken = await new Promise((resolve, reject) => {
-      oauth2Client.getAccessToken((err, token) => {
-        if (err) {
-          console.error("❌ Failed to create access token:", err);
-          reject("Failed to create access token");
-        }
-        resolve(token);
-      });
-    });
-
-    const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 587,
-      secure: false, // MUST be false for 587
-      requireTLS: true,
-      pool: true, // 🚀 Enables connection pooling for concurrent emails (Guarantor 1 & 2)
-      maxConnections: 3, // Limits simultaneous connections to avoid ISP throttling
-      connectionTimeout: 20000, // Wait 20 seconds before giving up
-      greetingTimeout: 20000,
-      socketTimeout: 20000,
-      tls: {
-        rejectUnauthorized: false // Helps bypass strict local antivirus/firewall SSL checks
-      },
-      auth: {
-        type: "OAuth2",
-        user: process.env.EMAIL_USER,
-        accessToken,
-        clientId: process.env.MAILER_CLIENT_ID,
-        clientSecret: process.env.MAILER_CLIENT_SECRET,
-        refreshToken: process.env.MAILER_REFRESH_TOKEN,
-      },
-    });
-
-    return transporter;
-  } catch (error) {
-    console.error("❌ Error setting up Nodemailer OAuth2 Transporter:", error);
-    throw error;
-  }
+  return google.gmail({ version: "v1", auth: oauth2Client });
 };
 
-// 2. Generic Send Function via Nodemailer (Bypasses Render Block)
+// 2. Generic Send Function using Google API directly
 const sendEmail = async ({ to, subject, html }) => {
   try {
-    const emailTransporter = await createTransporter();
+    const gmail = createGmailClient();
 
-    const mailOptions = {
-      from: `"ASCON Cooperative" <${process.env.EMAIL_USER}>`,
-      to,
-      subject,
+    // Construct an RFC 2822 formatted email string
+    const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString("base64")}?=`;
+    const messageParts = [
+      `From: "ASCON Cooperative" <${process.env.EMAIL_USER}>`,
+      `To: ${to}`,
+      `Content-Type: text/html; charset=utf-8`,
+      `MIME-Version: 1.0`,
+      `Subject: ${utf8Subject}`,
+      "",
       html,
-    };
+    ];
+    const message = messageParts.join("\n");
 
-    const info = await emailTransporter.sendMail(mailOptions);
+    // The Gmail API requires a base64url encoded string
+    const encodedMessage = Buffer.from(message)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+
+    // Dispatch via HTTPS (Port 443) instead of SMTP
+    const res = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: {
+        raw: encodedMessage,
+      },
+    });
+
     console.log(
-      `✉️ Nodemailer: Email securely dispatched to ${to} [ID: ${info.messageId}]`,
+      `✉️ Gmail HTTP API: Email securely dispatched to ${to} [ID: ${res.data.id}]`,
     );
   } catch (error) {
-    console.error(`❌ Nodemailer Error sending to ${to}:`, error.message);
+    console.error(`❌ Gmail API Error sending to ${to}:`, error.message);
     throw error;
   }
 };
