@@ -12,20 +12,19 @@ const getFrontendUrl = () =>
   process.env.NEXT_PUBLIC_FRONTEND_URL ||
   "http://localhost:3000";
 
-// 1. Setup the OAuth2 Transporter
+// 1. Setup the OAuth2 Transporter with extreme resilience
 const createTransporter = async () => {
   try {
     const oauth2Client = new OAuth2(
       process.env.MAILER_CLIENT_ID,
       process.env.MAILER_CLIENT_SECRET,
-      "https://developers.google.com/oauthplayground",
+      "https://developers.google.com/oauthplayground"
     );
 
     oauth2Client.setCredentials({
       refresh_token: process.env.MAILER_REFRESH_TOKEN,
     });
 
-    // Generate a new access token dynamically
     const accessToken = await new Promise((resolve, reject) => {
       oauth2Client.getAccessToken((err, token) => {
         if (err) {
@@ -36,20 +35,28 @@ const createTransporter = async () => {
       });
     });
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false, // MUST be false for port 587. It will upgrade to secure via STARTTLS
-  requireTLS: true,
-  auth: {
-    type: "OAuth2",
-    user: process.env.EMAIL_USER,
-    accessToken,
-    clientId: process.env.MAILER_CLIENT_ID,
-    clientSecret: process.env.MAILER_CLIENT_SECRET,
-    refreshToken: process.env.MAILER_REFRESH_TOKEN,
-  },
-});
+    const transporter = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false, // MUST be false for 587
+      requireTLS: true,
+      pool: true, // 🚀 Enables connection pooling for concurrent emails (Guarantor 1 & 2)
+      maxConnections: 3, // Limits simultaneous connections to avoid ISP throttling
+      connectionTimeout: 20000, // Wait 20 seconds before giving up
+      greetingTimeout: 20000,
+      socketTimeout: 20000,
+      tls: {
+        rejectUnauthorized: false // Helps bypass strict local antivirus/firewall SSL checks
+      },
+      auth: {
+        type: "OAuth2",
+        user: process.env.EMAIL_USER,
+        accessToken,
+        clientId: process.env.MAILER_CLIENT_ID,
+        clientSecret: process.env.MAILER_CLIENT_SECRET,
+        refreshToken: process.env.MAILER_REFRESH_TOKEN,
+      },
+    });
 
     return transporter;
   } catch (error) {
